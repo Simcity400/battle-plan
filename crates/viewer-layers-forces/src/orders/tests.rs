@@ -528,6 +528,16 @@ fn a_plan_of_rows_behind_the_hour_applied_says_their_hour_and_never_current() {
 }
 
 #[test]
+fn a_late_row_declaration_does_not_leave_the_old_plan_made_at_its_hour() {
+    let (_entry, mut fed, mut layer, _plans) = gated("orders late declaration", campaign);
+    stands_at(&mut fed, &mut layer, 0);
+    assert!(layer.made_at(0));
+    let reader = layer.rows.lock().unwrap().as_ref().cloned().expect("orders reader");
+    reader.declare_only(&[TableId::Clock]);
+    assert!(!layer.made_at(0), "clearing the reader frame invalidates the old plan");
+}
+
+#[test]
 fn a_compose_shows_the_plan_before_it_and_counts_none_until_one_is_made_after_the_reset() {
     use viewer_layer_core::layers::Published;
     let (_entry, mut fed, mut layer, _plans) = gated("orders composed", campaign);

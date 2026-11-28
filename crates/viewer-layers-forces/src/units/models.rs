@@ -479,6 +479,7 @@ impl Models {
     pub(super) fn made_at(&self, hour: Hour) -> bool {
         (self.worker.is_none() && self.refused.is_some()) || self.made.as_ref().is_some_and(|made| {
             made.generation == self.generation && self.asked.as_ref() == Some(&made.key)
+                && self.reader.has_rows_at(hour)
                 && (made.stands == hour || (made.refusal.is_none() && made.stands > hour))
         })
     }

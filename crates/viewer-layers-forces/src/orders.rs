@@ -647,7 +647,9 @@ impl Layer for Orders {
     }
 
     fn made_at(&self, hour: Hour) -> bool {
-        self.perspective().is_none() || self.made_for() == Some(hour)
+        self.perspective().is_none()
+            || (self.made_for() == Some(hour)
+                && self.rows.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().is_some_and(|reader| reader.has_rows_at(hour)))
     }
 
     fn held(&self) -> usize {

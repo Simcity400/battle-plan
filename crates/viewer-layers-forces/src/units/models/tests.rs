@@ -212,6 +212,17 @@ fn a_build_begins_only_for_rows_whose_declared_tables_changed() {
     assert!(models(&side).refused.as_deref().is_some_and(|why| why.contains("no unit models in this test")), "{:?}", models(&side).refused);
 }
 
+#[test]
+fn a_late_row_declaration_does_not_leave_the_old_models_made_at_their_hour() {
+    let joins = Arc::new(Mutex::new(None));
+    let (_entry, mut side) = side_of(clock("models late declaration", 2), Maker::new(Arc::new(Counted::default()), &[], &joins));
+    answered_at(&mut side, 0);
+    until("the first models", || models(&side).stands() == Some(0));
+    assert!(models(&side).made_at(0));
+    models(&side).reader.declare_only(&[TableId::Clock]);
+    assert!(!models(&side).made_at(0), "clearing the reader frame invalidates the old models");
+}
+
 #[derive(Default)]
 struct Gated {
     begun: Mutex<Vec<Hour>>,
