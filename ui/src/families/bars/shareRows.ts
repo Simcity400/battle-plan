@@ -13,6 +13,7 @@ export interface ShareRowEntry {
   readonly group?: 'picked' | 'auto';
   readonly region?: number;
   readonly segments: readonly BarsSegment[];
+  readonly segmentsIncomplete?: boolean;
   readonly countText?: string | BarsReadout;
   readonly missing?: Value;
   readonly format?: ValueFormat;
@@ -50,6 +51,7 @@ function toShareDataRow(entry: ShareRowEntry, group?: 'picked' | 'auto'): BarsDa
     group: entry.group ?? group,
     ...(entry.region !== undefined ? { region: entry.region } : {}),
     segments: entry.segments,
+    ...(entry.segmentsIncomplete ? { segmentsIncomplete: true } : {}),
     ...(entry.missing ? { value: { value: entry.missing, format: entry.format } } : {}),
     ...(entry.countText !== undefined ? { readout: typeof entry.countText === 'string' ? { primary: entry.countText } : entry.countText } : {}),
     ...(entry.tooltip ? { tooltip: entry.tooltip } : {}),

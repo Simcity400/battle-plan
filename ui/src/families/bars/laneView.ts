@@ -1,12 +1,12 @@
 import { LABEL_WEIGHT } from '../../charts/draw.ts';
 import { textWidth } from '../../charts/textWidth.ts';
-import { splitBarWidths } from '../../draw/kit.ts';
+import { shareBarGeometry, splitBarWidths } from '../../draw/kit.ts';
 import type { BarsPlaybackForm } from '../contract.ts';
 import type { LaneBinding, LaneFamily, LaneFrame } from '../laneRuntime.ts';
 import type { MotionSampleDiagnostic } from '../motion.ts';
 import { glideDurationForSpeed } from '../table/painter.ts';
 import { barsAuditWindow, barsRangeForBand, barsScrollHeight, layoutFamilyBars, visibleBarsRange, type BarsLayout } from './layout.ts';
-import { assertBarsModelValid, barsLabelText, deriveBarsAudit, deriveBarsMirror, deriveBarsTooltip, formatBarsValueField, isSingleValueOrdered, type BarsDataRow, type BarsModel, type BarsRow, type BarsValueField } from './model.ts';
+import { assertBarsModelValid, barsLabelText, deriveBarsAudit, deriveBarsMirror, deriveBarsTooltip, formatBarsValueField, supportsBarsPlayback, type BarsDataRow, type BarsModel, type BarsRow, type BarsValueField } from './model.ts';
 import { collectVisibleBarsIcons, drawFamilyBars, easeBarFraction, hitFamilyBars, orderedBarGeometry, type BarsEasedRow, type BarsGlideOffset } from './painter.ts';
 import { hitPickList, pickAudit, pickedKey, pickNav, pickTooltip } from './pickList.ts';
 import { barsRegionRows } from './shareRows.ts';
@@ -201,13 +201,14 @@ function measuredTarget(target: NonNullable<BarsDataRow['target']>): boolean {
     && (target.value.kind === 'known' || target.value.kind === 'zero') && typeof target.value.value !== 'string';
 }
 
-function compatibleSegments(first: NonNullable<BarsDataRow['segments']>, second: NonNullable<BarsDataRow['segments']>): boolean {
+function compatibleSegments(first: NonNullable<BarsDataRow['segments']>, second: NonNullable<BarsDataRow['segments']>, allowZero = false): boolean {
   return first.length === second.length && first.every((segment, i) => {
     const next = second[i]!;
     return segment.key === next.key && segment.label === next.label && segment.color === next.color
       && Boolean(segment.hatched) === Boolean(next.hatched) && sameFormat(segment.format, next.format)
-      && segment.share > 0 && next.share > 0
-      && segment.value.kind === 'known' && next.value.kind === 'known';
+      && (allowZero ? (segment.share > 0) === (next.share > 0) : segment.share > 0 && next.share > 0)
+      && (segment.value.kind === 'known' || (allowZero && segment.value.kind === 'zero'))
+      && (next.value.kind === 'known' || (allowZero && next.value.kind === 'zero'));
   });
 }
 
@@ -326,6 +327,44 @@ function orderedMotion(frame: BarsFrame, next: BarsModel, fraction: number, next
   };
 }
 
+function shareMotion(frame: BarsFrame, next: BarsModel, fraction: number, nextLayout: () => BarsLayout, diagnostic?: MotionSampleDiagnostic): BarsFrame | false | null {
+  const current = frame.model;
+  const endpoints = matchingRows(current, next, diagnostic);
+  if (!endpoints) return null;
+  const layout = frame.layout;
+  const endLayout = nextLayout();
+  if (layout.plotLeft !== endLayout.plotLeft || layout.plotWidth !== endLayout.plotWidth
+    || layout.showReadout !== endLayout.showReadout) return null;
+  const playbackValues = new Map<string, BarsEasedRow>();
+  let changed = false;
+  const blend = (from: number, to: number) => {
+    changed ||= from !== to;
+    return from + (to - from) * fraction;
+  };
+  const blendBounds = (from: { x: number; width: number }, to: { x: number; width: number }) => ({
+    x: blend(from.x, to.x),
+    width: blend(from.width, to.width),
+  });
+  for (const [i, row] of current.rows.entries()) {
+    if (row.kind !== 'data') continue;
+    const end = endpoints[i]!;
+    if (end.kind !== 'data' || row.segmentsIncomplete || end.segmentsIncomplete
+      || (row.value && row.value.value.kind !== 'known' && row.value.value.kind !== 'zero')
+      || (end.value && end.value.value.kind !== 'known' && end.value.value.kind !== 'zero')) return null;
+    const first = row.segments ?? [];
+    const last = end.segments ?? [];
+    if (!compatibleSegments(first, last, true)) return null;
+    if (!first.length) continue;
+    const from = shareBarGeometry(layout.plotLeft, layout.plotWidth, first.map(segment => segment.share));
+    const to = shareBarGeometry(layout.plotLeft, layout.plotWidth, last.map(segment => segment.share));
+    playbackValues.set(row.key, { shareGeometry: {
+      segments: from.segments.map((bounds, i) => blendBounds(bounds, to.segments[i]!)),
+      remainder: blendBounds(from.remainder, to.remainder),
+    } });
+  }
+  return changed ? { ...frame, playbackValues } : false;
+}
+
 export const barsLane: LaneFamily<FamilyBarsBinding, BarsModel, BarsLayout> = {
   family: 'bars',
   boundary(model, hour) {
@@ -335,9 +374,11 @@ export const barsLane: LaneFamily<FamilyBarsBinding, BarsModel, BarsLayout> = {
   redraw: () => Infinity,
   playback: {
     enabled: binding => !binding.reducedMotion && !binding.motion,
-    supports: isSingleValueOrdered,
+    supports: supportsBarsPlayback,
     unavailable: model => model.emptyKind === 'unavailable',
-    frame: orderedMotion,
+    frame: (frame, next, fraction, nextLayout, form, diagnostic) => form === 'share'
+      ? shareMotion(frame, next, fraction, nextLayout, diagnostic)
+      : orderedMotion(frame, next, fraction, nextLayout, form, diagnostic),
   },
   status: model => (model.rows.length > 0 || model.empty !== undefined ? 'picture' : 'scene'),
   view: [],

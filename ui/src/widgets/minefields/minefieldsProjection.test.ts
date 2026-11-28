@@ -106,6 +106,27 @@ test('minefields projection marks truncated total as notRecorded rather than zer
   assert.throws(() => view.who('country', 'ENG', displayedHour(101)), FutureDataError);
 });
 
+test('minefields retains a known share while marking an incomplete owner breakdown', () => {
+  const base = REPLY.regions[1]!;
+  const hour = displayedHour(350);
+  for (const unreadOwner of [false, true]) {
+    const live = valuesOf(new Map([
+      [liveKey('3', 'ENG'), 900000],
+      [liveKey('3', 'total'), 1400000],
+    ]), 'Not recorded at this hour');
+    const regions = [{
+      ...base,
+      owners: unreadOwner ? base.owners : base.owners.slice(0, 1),
+      unknownOwners: unreadOwner ? 0 : 1,
+    }];
+    const view = createBoundedReadView({ hour, panels: new Map([['main', { ...REPLY, regions }]]), live: new Map([['main', live]]) });
+    const row = minefieldsProjection.project(view, { surface: '#1e1e1e', order: 'mines' }).rows.find(item => item.kind === 'data')!;
+    assert.deepEqual(row.segments?.map(segment => segment.key), ['ENG']);
+    assert.equal(row.value, undefined);
+    assert.equal(row.segmentsIncomplete, true);
+  }
+});
+
 test('an owner without a recorded colour keeps one colour whichever place its amount gives it', () => {
   const identity = fakeIdentity({ GER: { name: 'German Reich', color: '#6b7280' } });
   const colourOf = (owners: readonly string[], amounts: readonly number[]) => {

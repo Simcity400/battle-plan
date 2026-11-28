@@ -812,6 +812,33 @@ export interface ShareBarSegment {
   readonly labelAlign?: 'left' | 'right';
 }
 
+interface ShareBarBounds {
+  readonly x: number;
+  readonly width: number;
+}
+
+export interface ShareBarGeometry {
+  readonly segments: readonly ShareBarBounds[];
+  readonly remainder: ShareBarBounds;
+}
+
+export function shareBarGeometry(x: number, width: number, shares: readonly number[]): ShareBarGeometry {
+  const active = shares.filter(share => share > 0);
+  const gap = active.length > 1 ? 1 : 0;
+  const usable = Math.max(0, width - gap * Math.max(0, active.length - 1));
+  const complete = active.reduce((total, share) => total + share, 0) >= 0.999;
+  const right = x + width;
+  let cursor = x;
+  const segments = active.map((share, i) => {
+    const width = complete && i === active.length - 1 ? Math.max(0, right - cursor) : usable * share;
+    const bounds = { x: cursor, width };
+    if (width > 0) cursor += width + gap;
+    return bounds;
+  });
+  const remainderX = complete ? right : Math.min(right, cursor);
+  return { segments, remainder: { x: remainderX, width: right - remainderX } };
+}
+
 export function drawShareBar(
   ctx: Canvas2D,
   x: number,
@@ -821,6 +848,7 @@ export function drawShareBar(
   segments: readonly ShareBarSegment[],
   theme: FamilyTheme,
   radius = 2.5,
+  geometry?: ShareBarGeometry,
 ): void {
   if (width <= 0 || height <= 0) return;
   const tokens = resolveKitTokens(theme);
@@ -834,15 +862,10 @@ export function drawShareBar(
   ctx.clip();
 
   const active = segments.filter(seg => seg.share > 0);
-  const gap = active.length > 1 ? 1 : 0;
-  const usable = Math.max(0, width - gap * Math.max(0, active.length - 1));
-  let cursor = x;
-  let total = 0;
-  for (let i = 0; i < active.length; i++) total += active[i]!.share;
-  const complete = total >= 0.999;
+  const bounds = geometry ?? shareBarGeometry(x, width, active.map(seg => seg.share));
   for (let i = 0; i < active.length; i++) {
     const seg = active[i]!;
-    const segW = complete && i === active.length - 1 ? Math.max(0, x + width - cursor) : usable * seg.share;
+    const { x: cursor, width: segW } = bounds.segments[i]!;
     if (segW <= 0) continue;
     if (seg.hatched) {
       drawHatchRect(ctx, cursor, y, segW, height, 0, theme);
@@ -861,9 +884,8 @@ export function drawShareBar(
       const shown = textWidth(ctx, seg.label) <= room ? seg.label : seg.shortLabel && textWidth(ctx, seg.shortLabel) <= room ? seg.shortLabel : null;
       if (shown) ctx.fillText(shown, right ? cursor + segW - pad : cursor + pad, y + height / 2);
     }
-    cursor += segW + gap;
   }
-  if (!complete && cursor < x + width) drawHatchRect(ctx, cursor, y, x + width - cursor, height, 0, theme);
+  if (bounds.remainder.width > 0) drawHatchRect(ctx, bounds.remainder.x, y, bounds.remainder.width, height, 0, theme);
   ctx.restore();
 }
 

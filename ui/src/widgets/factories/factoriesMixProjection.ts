@@ -66,6 +66,7 @@ function formatWhole(value: number): string {
 export const factoriesMixProjection: BarsProjection<FactoriesMixOptions> = registerFamilyProjection({
   kind: 'factories',
   family: 'bars',
+  singleValueBars: () => 'share',
   project(readView: BoundedReadView, options: FactoriesMixOptions): BarsModel {
     const hour = readView.hour;
     const refused = readView.refused('main');
@@ -137,6 +138,7 @@ export const factoriesMixProjection: BarsProjection<FactoriesMixOptions> = regis
           label: pres.label,
           media: pres.media,
           segments: [],
+          segmentsIncomplete: item.partsMissing !== null || item.values.length !== partInfo.length || item.values.some(raw => raw === null),
           countText,
           tooltip: { title: barsLabelText(pres.label), hour, items: tooltipItems },
           meta,

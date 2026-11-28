@@ -19,6 +19,7 @@ export interface NavalLossesMixOptions extends ForceAtMixOptions {
 export const navalLossesMixProjection: BarsProjection<NavalLossesMixOptions> = registerFamilyProjection({
   kind: 'naval-losses',
   family: 'bars',
+  singleValueBars: () => 'share',
   nextChange: () => Infinity,
   project(readView: BoundedReadView, options: NavalLossesMixOptions): BarsModel {
     const hour = readView.hour;

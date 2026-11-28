@@ -378,7 +378,9 @@ const COMMON = {
   jumpToDate: true,
 };
 
-export const supremacySharesProjection: BarsProjection<SupremacyOptions> = { kind: 'naval-supremacy', family: 'bars', project: projectSupremacyShares };
+export const supremacySharesProjection: BarsProjection<SupremacyOptions> = {
+  kind: 'naval-supremacy', family: 'bars', singleValueBars: () => 'share', project: projectSupremacyShares,
+};
 export const supremacyTimelineProjection: HeatLanesProjection<SupremacyOptions> = { kind: 'naval-supremacy', family: 'heat-lanes', project: projectSupremacyTimeline };
 
 export const supremacySharesDeclaration: BarsWidgetDeclaration<SupremacyOptions> = {

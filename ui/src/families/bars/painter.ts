@@ -7,6 +7,7 @@ import {
   barCornerRadius,
   contrastInkForFill,
   drawShareBar,
+  type ShareBarGeometry,
   drawBar,
   drawLegendStrip,
   drawMissingMark,
@@ -67,6 +68,7 @@ export interface BarsEasedRow {
   readonly orderedGeometry?: OrderedBarGeometry;
   readonly segmentWidths?: readonly number[];
   readonly segmentShares?: Readonly<Record<string, number>>;
+  readonly shareGeometry?: ShareBarGeometry;
 }
 
 interface OrderedBarGeometry {
@@ -590,6 +592,7 @@ export function drawFamilyBars(ctx: Canvas2D, input: DrawFamilyBarsInput): BarsP
           }),
           theme,
           2.5,
+          eased?.shareGeometry,
         );
       } else {
         ctx.save();
