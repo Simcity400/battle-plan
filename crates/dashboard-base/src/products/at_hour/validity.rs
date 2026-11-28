@@ -415,6 +415,14 @@ impl ScriptedInputs {
         self
     }
 
+    pub fn release_world(&self) {
+        if let Some(world) = &self.world { world.lock().unwrap_or_else(std::sync::PoisonError::into_inner).release(); }
+    }
+
+    pub fn release_world_for(source: &Source) {
+        source.state::<ScriptedWorld>().lock().unwrap_or_else(std::sync::PoisonError::into_inner).release();
+    }
+
     pub fn evaluate<T>(&self, frame: &DecodedFrame, tables: &[TableId], cancelled: &AtomicBool, evaluate: impl FnOnce(&DecodedFrame) -> T) -> io::Result<(T, i32)> {
         self.evaluate_with_reads(frame, tables, cancelled, |world| (evaluate(world), Vec::new()))
     }
@@ -422,13 +430,13 @@ impl ScriptedInputs {
     pub fn evaluate_with_reads<T>(&self, frame: &DecodedFrame, tables: &[TableId], cancelled: &AtomicBool, evaluate: impl FnOnce(&DecodedFrame) -> (T, Vec<TableRead>)) -> io::Result<(T, i32)> {
         let Some(block) = self.replay.block_at(frame.branch, frame.hour) else {
             if let Some(lexical) = &self.lexical { lexical.release(); }
-            if let Some(world) = &self.world { world.lock().unwrap_or_else(std::sync::PoisonError::into_inner).release(); }
+            self.release_world();
             return Err(io::Error::other("Scripted text hour is not recorded"));
         };
         if self.lexical.is_some() { check_cancel(cancelled)?; }
         let recorded = read_with_lexical(self.lexical.as_ref(), &self.replay, (block.run, frame.hour), tables, |tables| {
             let exact = || self.replay.seek_selected_with(frame.branch, frame.hour, Some(tables), || check_cancel(cancelled));
-            let read = if let Some(world) = &self.world {
+            let read = if let Some(world) = self.world.as_ref().filter(|_| READ_DATES.get()) {
                 check_cancel(cancelled)?;
                 let result = world.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
                     .read(&self.replay, frame.branch, frame.hour, tables);

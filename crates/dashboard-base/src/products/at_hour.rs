@@ -94,6 +94,7 @@ pub trait AtHour: 'static {
     const CONTENT_DEPENDENT: bool;
     const INTERACTIVE: bool = true;
     const PREPARE: Option<PrepareHour<Self::Params>> = None;
+    const RESET_READERS: Option<fn(&Self::Context)> = None;
     const FIELDS: super::Fields;
     type Params: DeserializeOwned + Send + 'static;
     type Reply: Serialize + ReplyWarnings + PartialEq + Send + 'static;
@@ -402,6 +403,7 @@ where P::Params: Sync, P::Context: Sync {
     } else { (advance, None) };
     let (replay, holders, timeline, executable) = (source.replay(), query.holders, query.timeline, source.tables());
     let cold: dashboard_follow::panel::ExactReader = Arc::new(move |hour, cancelled| {
+        if let Some(reset) = P::RESET_READERS && timeline.at(hour).is_none() { reset(&context); }
         let query = Query { replay: &replay, timeline: timeline.clone(), holders: holders.clone() };
         let reply = engine_executable::executable_tables::scope(executable, || finish.reply(||
             answered::<P, _>(&query, &pool, &params, hour, || Ok(context.as_ref()), cancelled).map(|(reply, live)| WithLive { reply, live }))).map_err(|e| e.to_string())?;

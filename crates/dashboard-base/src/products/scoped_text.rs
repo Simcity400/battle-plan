@@ -66,7 +66,7 @@ impl ScriptedWorld {
 
     pub(crate) fn read(&mut self, replay: &Arc<Replay>, branch: u64, hour: i32, tables: &[TableId]) -> io::Result<SeekResult> {
         if self.0.as_ref().is_none_or(|cursor| cursor.tables() != tables || !Arc::ptr_eq(cursor.replay(), replay)) {
-            let bookkeeping = size_of::<Mutex<ScriptedWorld>>() + 2 * size_of::<usize>();
+            let bookkeeping = size_of::<Mutex<ScriptedWorld>>() - size_of::<HourCursor>() + 2 * size_of::<usize>();
             self.0 = Some(HourCursor::bounded(Arc::clone(replay), tables, SCRIPTED_WORLD_BYTES - bookkeeping));
         }
         self.0.as_mut().expect("made").seek(branch, hour).inspect_err(|_| self.release())

@@ -435,14 +435,22 @@ impl TableReader {
 
     pub fn park_exact(&mut self) -> Option<usize> {
         if self.absent { return None; }
-        self.park_frame()
+        self.park_frame().map(|heap| heap + size_of::<Self>())
     }
 
     pub(crate) fn resume_frame(&mut self, recording: &Recording, ordinal: u32) -> io::Result<()> {
-        if self.entry.is_none() && !self.absent && self.ordinal.is_some() {
-            self.entry = Some(recording.table_entry(self.run, self.block, self.table)?);
+        if self.entry.is_some() || self.absent || self.ordinal.is_none() {
+            return self.go_to(recording, ordinal);
         }
-        self.go_to(recording, ordinal)
+        let resumed = recording.table_entry(self.run, self.block, self.table).and_then(|entry| {
+            self.entry = Some(entry);
+            self.go_to(recording, ordinal)
+        });
+        if resumed.as_ref().is_err_and(|error| error.kind() == io::ErrorKind::InvalidData) {
+            *self = Self::new(recording, self.run, self.table(), None)?;
+            return self.go_to(recording, ordinal);
+        }
+        resumed
     }
 
     pub(crate) fn park_frame(&mut self) -> Option<usize> {
@@ -452,7 +460,7 @@ impl TableReader {
             return None;
         }
         self.entry = None;
-        Some(self.held_bytes() + self.cells.column_capacity_bytes() + self.strings.reader_bytes() + self.cursor.retained_bytes() + size_of::<Self>()
+        Some(self.held_bytes() + self.cells.column_capacity_bytes() + self.strings.reader_bytes() + self.cursor.retained_bytes()
             + self.kinds.capacity() * size_of::<Kind>() + self.columns.capacity() * size_of::<usize>()
             + (self.view.capacity() + self.witnessed_before.capacity() + self.changes.inserted.capacity()
                 + self.changes.witnessed.capacity() + self.changes.written.iter().map(Vec::capacity).sum::<usize>()) * size_of::<u32>()
