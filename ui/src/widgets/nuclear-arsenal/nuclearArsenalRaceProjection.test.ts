@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { assertBarsModelValid, deriveBarsAudit, type BarsDataRow } from '../../families/bars/model.ts';
+import { assertBarsModelValid, deriveBarsAudit, deriveBarsMirror, type BarsDataRow } from '../../families/bars/model.ts';
 import { createBoundedReadView, displayedHour, FutureDataError } from '../../families/boundedView.ts';
 import type { IdentityProvider } from '../../families/plan.ts';
 import type { NuclearArsenalReply } from '../../generated/dashboard';
@@ -33,7 +33,7 @@ const REPLY: NuclearArsenalReply = {
   ],
   countries: [
     { tag: 'USA', countryId: 1, slot: null, total: 10, counts: [{ ordinal: 0, value: 6, ready: 2 }, { ordinal: 1, value: 4, ready: 0 }] },
-    { tag: 'SOV', countryId: 2, slot: null, total: 3, counts: [{ ordinal: 0, value: 3, ready: 0 }] },
+    { tag: 'SOV', countryId: 2, slot: null, total: 3, counts: [{ ordinal: 0, value: 5, ready: 0 }, { ordinal: 1, value: -2, ready: 0 }] },
   ],
   missing: null,
   warnings: [],
@@ -66,7 +66,10 @@ test('nuclear-arsenal race preserves Rust top order, builds weapon-type segments
     ['0', 'Nuclear Bomb', 60],
     ['1', 'Thermonuclear Bomb', 40],
   ]);
-  assert.ok(deriveBarsAudit(model).length > 0);
+  assert.deepEqual(rows[1]!.segments?.map(s => s.key), ['0']);
+  assert.equal(rows[1]!.tooltip?.items?.find(item => item.label === 'Thermonuclear Bomb')?.value, '\u22122');
+  assert.equal(deriveBarsMirror(model).rows[1]?.cells.find(cell => cell.column === 'segments')?.spoken, 'Nuclear Bomb 5, Thermonuclear Bomb \u22122');
+  assert.equal(deriveBarsAudit(model).find(cell => cell.key === 'SOV:part:1')?.value, '["known",["int","-2"]]');
   assert.throws(() => view.who('country', 'USA', displayedHour(501)), FutureDataError);
 });
 
