@@ -206,6 +206,14 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_preparation_wakes_once_and_is_not_pending_again() {
+        let ready = Arc::<Preparation>::default();
+        ready.start("failed artwork preparation", || Err(io::Error::other("renderer unavailable")));
+        ready.wait().unwrap_err();
+        assert!(matches!(ready.pending(), Err(error) if error.to_string() == "renderer unavailable"));
+    }
+
+    #[test]
     fn an_opened_sources_page_content_is_read_ahead_for_its_products() {
         let (source, options, _folder) = opened();
         read(&Arc::downgrade(&source), options.clone());

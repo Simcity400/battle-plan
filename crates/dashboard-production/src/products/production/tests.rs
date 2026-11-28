@@ -380,6 +380,13 @@ fn stockpile_artwork_played_steps_match_whole_frame_across_edits_damage_seeks_an
     let mut whole = frame_panel::<StockpileArtwork>(&source, &content_load, &art).unwrap();
     let panel = (STOCKPILE_STOCKPILEARTWORK.panel.unwrap().open)(&source, &content_load, &art).unwrap();
     let reader = panel.exact().unwrap();
+    let seed = (reader.advance)(FIRST, true, &false.into(), None);
+    if seed.pending {
+        let prepare = panel.pending_preparation().and_then(|prepare| prepare(FIRST)).expect("pending artwork seed has preparation");
+        let (ready, waited) = std::sync::mpsc::sync_channel(1);
+        prepare(std::sync::Arc::new(move || { let _ = ready.send(()); }));
+        waited.recv().unwrap();
+    }
     let steps = played(source.replay_ref(), reader, FIRST, FIRST + 21);
     for step in &steps {
         let expected = materialized_frame(&mut *whole, source.replay_ref(), 1, step.hour);
@@ -448,6 +455,13 @@ fn stockpile_artwork_played_steps_match_whole_frame_across_edits_damage_seeks_an
         let mut whole_b = frame_panel::<StockpileArtwork>(&multi_source, &multi_load, &req).unwrap();
         let panel_b = (STOCKPILE_STOCKPILEARTWORK.panel.unwrap().open)(&multi_source, &multi_load, &req).unwrap();
         let reader_b = panel_b.exact().unwrap();
+        let seed_b = (reader_b.advance)(FIRST, true, &false.into(), None);
+        if seed_b.pending {
+            let prepare = panel_b.pending_preparation().and_then(|prepare| prepare(FIRST)).expect("pending artwork branch seed has preparation");
+            let (ready, waited) = std::sync::mpsc::sync_channel(1);
+            prepare(std::sync::Arc::new(move || { let _ = ready.send(()); }));
+            waited.recv().unwrap();
+        }
         for h in FIRST..=FIRST + 4 {
             let expected = materialized_frame(&mut *whole_b, multi_source.replay_ref(), id, h);
             let got = (reader_b.advance)(h, h == FIRST, &false.into(), None).value;
