@@ -1516,6 +1516,10 @@ impl Playhead {
         }
     }
 
+    pub fn paused_seed_pending(&self) -> bool {
+        lock(&self.shared.control).seed_paused
+    }
+
     pub fn holding(&self) -> Option<u64> {
         lock_clock(&self.shared.clock).held()
     }

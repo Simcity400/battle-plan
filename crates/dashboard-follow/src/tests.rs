@@ -3217,9 +3217,18 @@ mod paused_reset {
         pieces: Vec<playhead::Piece>,
         hook_fn: impl FnMut(&StepStats, Option<Message>) + Send + 'static,
     ) -> (Arc<Playhead>, Arc<PlayheadHost<Playhead>>, Arc<Push>) {
+        open_host_with_hook(pages, pieces, hook_fn, |hook| hook)
+    }
+
+    fn open_host_with_hook(
+        pages: &Arc<Recording>,
+        pieces: Vec<playhead::Piece>,
+        hook_fn: impl FnMut(&StepStats, Option<Message>) + Send + 'static,
+        wrap: impl FnOnce(playhead::Hook) -> playhead::Hook,
+    ) -> (Arc<Playhead>, Arc<PlayheadHost<Playhead>>, Arc<Push>) {
         let timeline = Timeline::new(&**pages, pieces).unwrap();
         let follow = Follow::new(0);
-        let hook = follow.hook(Box::new(hook_fn));
+        let hook = wrap(follow.hook(Box::new(hook_fn)));
         let settings = Settings { step_threads: 1, fetch_threads: 1, ahead: 32, ring: 1, speed: 1.0, rate: 60.0, ..Settings::default() };
         let playhead = Arc::new(Playhead::new(Arc::clone(pages) as Arc<dyn Pages>, timeline, settings, Some(hook)).unwrap());
         let held = crate::host::held_tables(&**pages, pages.kinds.len());
@@ -3960,38 +3969,89 @@ mod paused_reset {
 
     #[test]
     fn paused_cold_open_siblings_suffer_zero_relapses_when_late_unseeded_consumer_seeks() {
+        use std::io::Write as _;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let hosted = std::env::var_os("GITHUB_ACTIONS").is_some();
+        let trace = move |event: std::fmt::Arguments<'_>| {
+            if hosted {
+                let thread = std::thread::current();
+                let name = thread.name().unwrap_or("unnamed thread");
+                let name = if name.starts_with("tests::") { "test" } else { name };
+                let _ = writeln!(std::io::stderr().lock(), "paused cold open [{name}] {event}");
+            }
+        };
+        trace(format_args!("building the recording fixture and opening the follow host"));
         let pages = record(quiet);
         let (follow_tx, follow_rx) = mpsc::channel();
-        let (playhead, host, push) = open_host(
+        let warm_gate = Arc::new(AtomicBool::new(false));
+        let armed = warm_gate.clone();
+        let (gate_tx, gates) = mpsc::channel();
+        let (playhead, host, push) = open_host_with_hook(
             &pages,
             vec![playhead::Piece { run: 0, first: 0, last: 3 }, playhead::Piece { run: 0, first: 5, last: 24 }],
-            move |_, message| {
+            move |stats, message| {
+                if stats.first <= stats.last || stats.reset || stats.sent != 0 {
+                    trace(format_args!("hook epoch {} hours {}..={} reset={} answers={}", stats.epoch, stats.first, stats.last, stats.reset, stats.sent));
+                }
                 if let Some(message) = message {
+                    if hosted && stats.sent != 0 && let Ok(packet) = decode(&message.bytes) {
+                        let answers = packet.answers.iter().map(|&(id, hour, _)| (id, hour)).collect::<Vec<_>>();
+                        trace(format_args!("follow answers (id, hour) {answers:?}"));
+                    }
                     let _ = follow_tx.send(message.bytes);
                 }
             },
+            move |mut hook| Box::new(move |step, lanes| {
+                let held = step.first() > step.last() && step.last() == 8 && armed.swap(false, Ordering::AcqRel);
+                if held {
+                    let (permit, wait) = mpsc::channel();
+                    trace(format_args!("warm hook waiting before product dispatch"));
+                    if gate_tx.send((false, permit)).is_ok() { let _ = wait.recv(); }
+                }
+                hook(step, lanes);
+                if held {
+                    let (permit, wait) = mpsc::channel();
+                    trace(format_args!("warm hook waiting after product dispatch"));
+                    if gate_tx.send((true, permit)).is_ok() { let _ = wait.recv(); }
+                }
+            }),
         );
+        let gates = gates;
         let mut seen = Vec::new();
+        trace(format_args!("anchoring the follow host at hour 0"));
         host.anchor(Anchor { seek: 1, frame_rate: 60.0, hour: 0, position: 0.0, timestamps: None, playing: false, speed: 1.0, sought: true });
+        trace(format_args!("waiting for the initial step at hour 0"));
         playhead.wait_newest(0).unwrap();
 
-        host.prepare_panel(product(Arc::new(|hour, _, _, _| {
-            let (live, value) = live_cell(0, 100, i64::from(hour) * 10);
+        host.prepare_panel(product(Arc::new(move |hour, _, _, step| {
+            if step.is_none() && hour == 0 { trace(format_args!("reading panel 100's seed")); }
+            let (live, mut value) = live_cell(0, 100, i64::from(hour) * 10);
+            Arc::get_mut(&mut value).unwrap().as_mut().unwrap()["hour"] = hour.into();
             ProductRead { value, rows: 1, fresh: true, pending: false, live: Some(live), lanes: Vec::new(), from: Hour::MIN }
         }))).unwrap()(100, 1).unwrap();
+        trace(format_args!("waiting for panel 100 DATA at hour 0"));
         let _ = take_panel_data(&mut seen, &push, 100, 0);
+        trace(format_args!("waiting for the initial lane declaration"));
         playhead.wait_declarations().unwrap();
         playhead.pace(16.0);
+        trace(format_args!("waiting for warm look-ahead through hour 8"));
         playhead.wait_newest(8).unwrap();
+        trace(format_args!("waiting for warm lane declarations"));
         playhead.wait_declarations().unwrap();
 
         let epoch_after_warm = playhead.epoch();
+        trace(format_args!("waiting for warm panel 100 DATA at hour 8 in epoch {epoch_after_warm}"));
+        let warmed = take_panel_data_at_epoch(&mut seen, &push, Some((&playhead, epoch_after_warm)), 100, 8);
+        assert_eq!(warmed["hour"], 8);
         for id in [101u32, 102] {
             let offset = i64::from(id);
-            host.prepare_panel(product(Arc::new(move |hour, _, _, _| {
+            host.prepare_panel(product(Arc::new(move |hour, _, _, step| {
+                if step.is_none() && hour == 0 { trace(format_args!("reading panel {id}'s seed")); }
                 let (live, value) = live_cell(0, 100, i64::from(hour) * 10 + offset);
                 ProductRead { value, rows: 1, fresh: true, pending: false, live: Some(live), lanes: Vec::new(), from: Hour::MIN }
             }))).unwrap()(id, 1).unwrap();
+            trace(format_args!("waiting for panel {id} DATA at hour 0 in epoch {epoch_after_warm}"));
             let data = take_panel_data_at_epoch(&mut seen, &push, Some((&playhead, epoch_after_warm)), id, 0);
             assert_eq!(data["live"]["groups"][0]["seedHour"], 0);
         }
@@ -4005,15 +4065,19 @@ mod paused_reset {
         host.prepare_panel(product(Arc::new(move |hour, _, _, step| {
             if hour == 0 && step.is_none() {
                 if inflight_seed_calls_ref.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 0 {
+                    trace(format_args!("panel 103 seed waiting for release from the test"));
                     let _ = inflight_entered_tx.send(());
                     let _ = inflight_release_rx.lock().unwrap().recv();
+                    trace(format_args!("panel 103 seed released"));
                 }
             }
             let (live, value) = live_cell(0, 100, i64::from(hour) * 10 + 103);
             ProductRead { value, rows: 1, fresh: true, pending: false, live: Some(live), lanes: Vec::new(), from: Hour::MIN }
         }))).unwrap()(103, 1).unwrap();
+        trace(format_args!("waiting for panel 103 to reach the seed gate"));
         inflight_entered_rx.recv().unwrap();
 
+        trace(format_args!("draining packets before the late panel is installed"));
         seen.clear();
         while let Some((kind, bytes, _, _)) = push.try_take() {
             push.credit(push.session(), u64::MAX);
@@ -4051,13 +4115,40 @@ mod paused_reset {
         };
 
         seen.clear();
-        host.prepare_panel(product(Arc::new(|hour, _, _, _| {
+        warm_gate.store(true, Ordering::Release);
+        host.follow().rehooker()();
+        trace(format_args!("waiting for the warm hook before product dispatch"));
+        let (passed, warm_permit) = gates.recv().unwrap();
+        assert!(!passed);
+        let block_future = Arc::new(AtomicBool::new(true));
+        let still_warm = block_future.clone();
+        let (future_release, future_wait) = mpsc::channel::<()>();
+        let future_wait = Mutex::new(future_wait);
+        host.prepare_panel(product(Arc::new(move |hour, _, _, step| {
+            if step.is_none() && hour == 0 { trace(format_args!("reading panel 104's seed")); }
+            if step.is_none() && hour > 0 && still_warm.load(Ordering::Acquire) {
+                trace(format_args!("panel 104 started a future read in the warm epoch"));
+                let _ = future_wait.lock().unwrap().recv();
+            }
             let (live, value) = live_cell(0, 100, 9_007_199_254_740_995 + i64::from(hour));
             ProductRead { value, rows: 1, fresh: true, pending: false, live: Some(live), lanes: Vec::new(), from: Hour::MIN }
         }))).unwrap()(104, 1).unwrap();
+        trace(format_args!("waiting for panel 104 DATA at hour 0"));
         let unseeded = drain_checking(&mut seen, 104, 0);
         let unseeded_follow = unseeded["live"]["groups"][0]["follow"].as_u64().expect("unseeded follow id") as u32;
         assert!(unseeded["live"]["groups"][0].get("seedHour").is_none(), "wide integer is unseeded");
+        trace(format_args!("waiting for panel 104's seed to return to the host"));
+        playhead.wait_for(|| host.hold_product(104).is_some_and(|put_back| { put_back(); true })).unwrap();
+        warm_permit.send(()).unwrap();
+        trace(format_args!("waiting for the warm hook after product dispatch"));
+        let (passed, warm_permit) = gates.recv().unwrap();
+        assert!(passed);
+        assert_eq!(playhead.epoch(), epoch_after_warm);
+        host.hold_product(104).expect("warm hook must leave the unseeded panel in the host")();
+        block_future.store(false, Ordering::Release);
+        drop(future_release);
+        warm_permit.send(()).unwrap();
+        trace(format_args!("waiting for follow id {unseeded_follow} at hour 0"));
         loop {
             let bytes = follow_rx.recv().expect("follow message for unseeded wide integer");
             let decoded = decode(&bytes).expect("valid follow message");
@@ -4067,11 +4158,17 @@ mod paused_reset {
         }
         assert_eq!(playhead.epoch(), epoch_after_warm + 1, "late unseeded wide-integer panel triggers exactly 1 paused seek");
 
+        trace(format_args!("waiting for the paused reset to publish before releasing panel 103"));
+        playhead.wait_newest(0).unwrap();
         inflight_release_tx.send(()).unwrap();
+        trace(format_args!("waiting for the released panel 103 DATA at hour 0"));
         let inflight_data = drain_checking(&mut seen, 103, 0);
         assert_eq!(inflight_data["live"]["groups"][0]["seedHour"], 0);
+        trace(format_args!("waiting for look-ahead through hour 8 after the seek"));
         playhead.wait_newest(8).unwrap();
+        trace(format_args!("waiting for lane declarations after the seek"));
         playhead.wait_declarations().unwrap();
+        trace(format_args!("draining the remaining packets"));
         while let Some((kind, bytes, _, _)) = push.try_take() {
             push.credit(push.session(), u64::MAX);
             if kind == PANEL {
@@ -4089,6 +4186,12 @@ mod paused_reset {
         assert_eq!(inflight_seed_calls.load(std::sync::atomic::Ordering::Acquire), 1, "in-flight sibling Seed(0) completed without being cancelled and re-run");
         assert!(waiting_after_settle.is_empty(), "settled and in-flight seeded siblings suffered zero paused-hour WAITING relapses during late unseeded seek: {waiting_after_settle:?}");
         assert!(waiting_beyond_delivery.iter().any(|&(id, hour)| id == 100 && hour > 8), "replacement seed emits WAITING beyond confirmed delivery so COMPLETED cannot extend stale hours: {waiting_beyond_delivery:?}");
+        drop(push);
+        trace(format_args!("dropping the follow host"));
+        drop(host);
+        trace(format_args!("dropping the playhead"));
+        drop(playhead);
+        trace(format_args!("teardown finished"));
     }
 
     #[test]

@@ -884,7 +884,11 @@ impl<E: Send + Sync + 'static> PlayheadHost<E> {
                     None
                 };
                 if let Some(job) = job {
-                    task(token.clone()).start(job, product, work, &owner, get);
+                    if matches!(job, PanelRead::CatchUp { .. }) && seed_hour < step.last() && playhead.paused_seed_pending() {
+                        work.put(product);
+                    } else {
+                        task(token.clone()).start(job, product, work, &owner, get);
+                    }
                     replies.push((id, None, token, step.last(), None, None));
                     continue;
                 }
@@ -1474,6 +1478,7 @@ fn an_older_handoff_dispatches_the_final_hour_without_another_native_step() {
     #[derive(Debug, PartialEq, Eq)]
     enum Gate {
         FinalStep,
+        BeforeArming,
         BeforeHandoff,
         AfterHandoff,
     }
@@ -1482,6 +1487,8 @@ fn an_older_handoff_dispatches_the_final_hour_without_another_native_step() {
     let observe = Arc::clone(&armed);
     let (gates, hook) = mpsc::channel();
     let mut at_final = false;
+    let mut unarmed_hook = false;
+    let mut handoff_hook = false;
     let advance = Arc::new(|hour, _, _: &AtomicBool, _: Option<panel::ProductStep<'_>>| ProductRead {
         value: Arc::new(Ok(serde_json::json!(hour))), rows: 1, fresh: true, pending: false, live: None, lanes: Vec::new(), from: hour,
     });
@@ -1491,9 +1498,14 @@ fn an_older_handoff_dispatches_the_final_hour_without_another_native_step() {
             if after || at_final { return; }
             at_final = true;
             Gate::FinalStep
-        } else if after && observe.swap(false, Ordering::AcqRel) {
+        } else if after {
+            if !std::mem::take(&mut handoff_hook) { return; }
             Gate::AfterHandoff
-        } else if !after && observe.load(Ordering::Acquire) {
+        } else if !unarmed_hook {
+            unarmed_hook = true;
+            Gate::BeforeArming
+        } else if observe.swap(false, Ordering::AcqRel) {
+            handoff_hook = true;
             Gate::BeforeHandoff
         } else {
             return;
@@ -1507,11 +1519,20 @@ fn an_older_handoff_dispatches_the_final_hour_without_another_native_step() {
     let (gate, permit) = hook.recv().unwrap();
     assert_eq!(gate, Gate::FinalStep);
     let work = host.panels.lock().unwrap().products[&1].clone();
-    let mut product = std::iter::repeat_with(|| work.take()).find_map(|product| product).unwrap();
+    let mut product = None;
+    playhead.wait_for(|| {
+        product = work.take();
+        product.is_some()
+    }).unwrap();
+    let mut product = product.unwrap();
     permit.send(()).unwrap();
     playhead.wait_newest(last).unwrap();
+    host.follow.rehooker()();
+    let (gate, permit) = hook.recv().unwrap();
+    assert_eq!(gate, Gate::BeforeArming);
     armed.store(true, Ordering::Release);
     host.follow.rehooker()();
+    permit.send(()).unwrap();
     let (gate, permit) = hook.recv().unwrap();
     assert_eq!(gate, Gate::BeforeHandoff);
     let older = serde_json::json!({ "late": last - 1 });
