@@ -912,6 +912,7 @@ fn moved_hours_are_read_against_the_mirrors_before_each_step_across_a_pack_and_a
     let declared = inputs.into_tables().into_iter().map(|(table, read)| playhead::Declared { table, columns: read.columns, keyed: read.keyed, passing: false, hourly: read.hourly }).collect();
     let playhead = playhead::Playhead::new(Arc::clone(&units.pages), units.timeline.clone(), quick(), None).unwrap();
     let mut consumer = playhead.consumer(playhead.declare(declared, Some(viewer_layer_core::playhead_host::mirror::rebuild(Arc::clone(&units.pages)))).unwrap());
+    consumer.set_blocking(true);
     playhead.seek(0);
     let last = BLOCK as i32 + 119;
     let divisions = TableId::Divisions.index();
