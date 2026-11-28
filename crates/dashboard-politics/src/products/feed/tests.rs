@@ -1341,7 +1341,7 @@ fn feed_tails_answer_one_occurrence_query_by_observation_cutoff_and_occurrence_d
     let finish = dashboard_base::products::Finish::new(&replay_source, &context, EventChoicesTail::CONTENT_DEPENDENT);
     REQUESTED_EVENT_LOCATORS.set(0);
     for (hour, new_locators) in [(100, None), (101, None), (102, None), (104, None), (105, Some(1)), (106, None), (110, None), (100, None), (105, Some(3))] {
-        let stepped = (choice_exact.advance)(hour, hour == 100, &cancel, None);
+        let (stepped, reads) = replay_recording::cells::count_reads(|| (choice_exact.advance)(hour, hour == 100, &cancel, None));
         let followed = REQUESTED_EVENT_LOCATORS.replace(0);
         let exact = finish.reply(|| EventChoicesTail::load(&replay_source, &cards(hour, None, selection("GER")), &context, &cancel)).unwrap();
         let rebuilt = REQUESTED_EVENT_LOCATORS.replace(0);
@@ -1350,6 +1350,7 @@ fn feed_tails_answer_one_occurrence_query_by_observation_cutoff_and_occurrence_d
             assert!(stepped.fresh, "the news event enters at 105");
             assert_eq!(rebuilt, 4, "the exact page requests all four event locators");
             assert_eq!(followed, new_locators, "the followed page requests only locators missing from the preceding page");
+            assert_eq!(reads.get(&TableId::FeedEvents).map_or(0, |feed| feed.opened), 0, "the followed page retains its event reader");
         }
     }
     let feed_panel = event_feed_dated_panel(&replay_source, &context, &serde_json::json!({ "panel": "event-feed-tail", "branchId": "1", "limit": 64, "categories": ["politics"] })).unwrap();
