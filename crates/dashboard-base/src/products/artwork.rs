@@ -2,7 +2,9 @@ use content_reader_key_names::key_name_products::KeyNamesExt as _;
 
 pub mod resolver;
 pub mod sprites;
+mod prepare;
 
+pub use prepare::{prepare_artwork, prepare_artwork_for};
 pub use resolver::{
     ArtFile, ArtFrame, ArtOrigin, ArtProvenance, ArtRenderVariant, ArtResolution, ArtScopeKey,
     ArtTarget, CURRENT_INSTALL_ART_LABEL, CURRENT_INSTALL_ART_NOTICE, FlagSetKey, Searched, art_file, art_scope_key, relayed_searches,

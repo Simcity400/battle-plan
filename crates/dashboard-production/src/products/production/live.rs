@@ -139,6 +139,8 @@ impl AtHour for ProductionLinesAt {
     const KEY: &'static str = "production-lines-at";
     const TITLE: &'static str = "Production lines";
     const CONTENT_DEPENDENT: bool = true;
+    const PREPARE: Option<dashboard_base::products::at_hour::PrepareHour<Self::Params>> =
+        Some(|source, _, load, _| dashboard_base::products::artwork::prepare_artwork(source, load));
     type Params = ProductionLinesAtParams;
     const FIELDS: dashboard_base::products::Fields = dashboard_base::fields![branchId, country, order];
     type Reply = ProductionLinesAtReply;

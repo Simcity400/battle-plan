@@ -1511,11 +1511,15 @@ impl Product for IdeaHistory {
         }
         let lexical = Lexical::for_source(source);
         let companions = CompanionTables::for_source(source);
-        ReadDates::prepare_selected(source, span.run, (span.first, span.last), DATE_SELECTIONS,
+        let dates = ReadDates::prepare_selected(source, span.run, (span.first, span.last), DATE_SELECTIONS,
             move |replay, run| {
                 lexical.prepare_checkpoints(replay, run);
                 companions.prepare_characters(replay, run);
-            })
+            })?;
+        dashboard_base::products::read_ahead::together(
+            dates,
+            dashboard_base::products::artwork::prepare_artwork(source, load)?,
+        )
     });
     type Params = IdeaHistoryParams;
     const FIELDS: dashboard_base::products::Fields = dashboard_base::fields![branchId, country, hour: Read];

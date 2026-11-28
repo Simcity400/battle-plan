@@ -60,6 +60,21 @@ impl Preparation {
 
 pub type Prepare<P> = fn(&Arc<Source>, &P, &LoadContext) -> io::Result<Option<Arc<Preparation>>>;
 
+pub fn together(first: Option<Arc<Preparation>>, second: Option<Arc<Preparation>>) -> io::Result<Option<Arc<Preparation>>> {
+    match (first, second) {
+        (Some(first), Some(second)) => {
+            let ready = Arc::<Preparation>::default();
+            let publish = Arc::clone(&ready);
+            first.on_ready(Box::new(move |result| match result {
+                Ok(()) => second.on_ready(Box::new(move |result| publish.publish(result))),
+                Err(error) => publish.publish(Err(error)),
+            }));
+            ready.pending()
+        }
+        (first, second) => Ok(first.or(second)),
+    }
+}
+
 #[derive(Default)]
 struct ReadAhead(bool);
 
@@ -89,6 +104,7 @@ fn read(source: &Weak<Source>, mut options: ContentOptions) {
     }
     if let Some(source) = source.upgrade() {
         source.resolve_bound(&mut options);
+        let _ = super::artwork::prepare_artwork(&source, &LoadContext { content: Some(options.clone()) });
     }
     let steps: [fn(&Source, &ContentOptions, Arc<Catalogue>); 5] = [
         |_, _, catalogue| warm_guis(&catalogue),
@@ -176,6 +192,25 @@ mod tests {
             state.start(|| { launches += 1; Ok(()) });
         }
         assert_eq!(launches, 1);
+    }
+
+    #[test]
+    fn a_reply_with_two_preparations_waits_for_both() {
+        let graphics = Arc::<Preparation>::default();
+        let names = Arc::<Preparation>::default();
+        let ready = together(Some(graphics.clone()), Some(names.clone())).unwrap().unwrap();
+        names.publish(Ok(()));
+        assert!(ready.result().is_none());
+        graphics.publish(Ok(()));
+        assert!(ready.result().unwrap().is_ok());
+    }
+
+    #[test]
+    fn a_failed_preparation_wakes_once_and_is_not_pending_again() {
+        let ready = Arc::<Preparation>::default();
+        ready.start("failed artwork preparation", || Err(io::Error::other("renderer unavailable")));
+        ready.wait().unwrap_err();
+        assert!(matches!(ready.pending(), Err(error) if error.to_string() == "renderer unavailable"));
     }
 
     #[test]

@@ -410,6 +410,8 @@ pub struct MarketLendLease;
 impl AtHour for MarketLendLease {
     const KEY: &'static str = "market-lendlease";
     const TITLE: &'static str = "Market and lend-lease";
+    const PREPARE: Option<dashboard_base::products::at_hour::PrepareHour<Self::Params>> =
+        Some(|source, _, load, _| dashboard_base::products::artwork::prepare_artwork(source, load));
     const CONTENT_DEPENDENT: bool = true;
     type Params = MarketLendLeaseParams;
     const FIELDS: dashboard_base::products::Fields = dashboard_base::fields![branchId, countries, only, leaseSide, group, row, "countries[]"];

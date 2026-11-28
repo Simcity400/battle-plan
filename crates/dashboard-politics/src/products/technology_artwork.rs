@@ -37,6 +37,8 @@ impl Product for TechnologyArtwork {
     const KEY: &'static str = "technology-artwork";
     const CONTENT_DEPENDENT: bool = true;
     const INTERACTIVE: bool = true;
+    const PREPARE: Option<dashboard_base::products::read_ahead::Prepare<Self::Params>> =
+        Some(|source, _, load| artwork::prepare_artwork(source, load));
     type Params = TechnologyArtworkParams;
     const FIELDS: dashboard_base::products::Fields = dashboard_base::fields![tokens, recorded, "recorded.*[]"];
     type Reply = TechnologyArtworkReply;

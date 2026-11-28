@@ -98,7 +98,14 @@ fn dated_products_seed_advance_confirm_and_reseed_across_a_recording_gap() {
         let mut delivery = Delivery::default();
         let mut previous = None;
         for (hour, seek) in [(100, true), (101, false), (102, false), (102, false), (104, false), (106, false), (110, false), (100, true)] {
-            let read = (exact.advance)(hour, seek, &false.into(), None);
+            let mut read = (exact.advance)(hour, seek, &false.into(), None);
+            if read.pending {
+                let wake = panel.pending_preparation().and_then(|prepare| prepare(hour)).expect("pending seed has preparation");
+                let (ready, waited) = std::sync::mpsc::sync_channel(1);
+                wake(Arc::new(move || { let _ = ready.send(()); }));
+                waited.recv().unwrap();
+                read = (exact.advance)(hour, seek, &false.into(), None);
+            }
             let cold = (exact.cold)(hour, &false.into());
             let shown = |data: &dashboard_follow::panel::PanelData, values: bool| data.clone().map(|mut reply| {
                 for group in reply.pointer_mut("/live/groups").and_then(Value::as_array_mut).into_iter().flatten() {

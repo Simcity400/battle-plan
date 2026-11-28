@@ -524,11 +524,11 @@ pub(crate) fn bound_catalogue_with(
     let settings = key.3.clone();
     let mount = Arc::downgrade(&presented.content);
     let result = with_slot(source, options, |slot| {
-        if slot.as_ref().is_some_and(|(cached, _, _)| *cached != key) {
+        if !source.bound_presented_for(options).is_some_and(|current| mount.ptr_eq(&Arc::downgrade(&current.content))) {
             return None;
         }
         Some(match slot.as_ref() {
-            Some((_, result, previous)) if previous.ptr_eq(&mount) => Arc::clone(result),
+            Some((cached, result, previous)) if *cached == key && previous.ptr_eq(&mount) => Arc::clone(result),
             _ => {
                 let result = Arc::new(CachedResult::default());
                 *slot = Some((key, Arc::clone(&result), mount));
@@ -546,11 +546,16 @@ pub(crate) fn bound_catalogue_with(
             Keeping::On,
         )
     });
-    Some(if reads_recorded(options) {
-        loaded
-    } else {
-        loaded.and_then(|shown| keeping_recorded(source, options, shown))
-    })
+    let shown = match loaded { Ok(shown) => shown, Err(error) => return Some(Err(error)) };
+    if !reads_recorded(options) && shown.recorded().is_none() {
+        let mut recorded = options.clone();
+        recorded.presentation = crate::presentation::Admitted::recorded(Arc::clone(options.presentation.binding()));
+        match bound_catalogue(source, &recorded)? {
+            Ok(recorded) => shown.keep_recorded(recorded),
+            Err(error) => return Some(Err(error)),
+        }
+    }
+    Some(Ok(shown))
 }
 
 #[cfg(any(test, feature = "test-support"))]

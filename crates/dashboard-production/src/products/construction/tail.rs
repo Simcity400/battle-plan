@@ -8,13 +8,15 @@ use super::{
 };
 use dashboard_base::{
     Source,
-    catalogue::Catalogue,
+    catalogue::{self, Catalogue},
     products::{
         LoadContext, Product,
+        at_hour::product_panel,
         occurrences::{self, OccurrenceCount, OccurrenceReply, OccurrenceSort},
+        read_ahead::Preparation,
     },
 };
-use dashboard_follow::panel::Panel;
+use dashboard_follow::panel::{ExactReader, Panel, ProductReader};
 use dashboard_query::{
     Query,
     identity::{Country, Holders},
@@ -28,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     io,
-    sync::{Arc, Mutex, PoisonError, atomic::AtomicBool},
+    sync::{Arc, Mutex, OnceLock, PoisonError, atomic::AtomicBool},
 };
 #[cfg(any(test, feature = "export-types"))]
 use ts_rs::TS;
@@ -770,16 +772,15 @@ fn factory_cap(defines: Result<&content_reader_defines::defines::Defines, String
     Ok(cap as i32)
 }
 
-fn tail(source: &Source, query: &Query<'_>, branch: u64, load: &LoadContext, cancelled: &AtomicBool) -> io::Result<Arc<Tail>> {
-    let content = Content::load(source, load);
-    let made = Made::of(&content);
+fn tail(source: &Source, query: &Query<'_>, branch: u64, content: &Content, cancelled: &AtomicBool) -> io::Result<Arc<Tail>> {
+    let made = Made::of(content);
     let kept = source.state::<Kept>();
     if let Some((held, found)) = kept.lock().unwrap_or_else(PoisonError::into_inner).0.get(&branch)
         && held.same(&made)
     {
         return Ok(Arc::clone(found));
     }
-    let built = Arc::new(scan(source, query, &content, cancelled)?);
+    let built = Arc::new(scan(source, query, content, cancelled)?);
     kept.lock().unwrap_or_else(PoisonError::into_inner).0.insert(branch, (made, Arc::clone(&built)));
     Ok(built)
 }
@@ -792,7 +793,7 @@ struct Prepared {
 
 fn prepare(source: &Source, query: &Query<'_>, branch: u64, load: &LoadContext, params: &ConstructionLogTailParams, cancelled: &AtomicBool) -> io::Result<Prepared> {
     let selection = dashboard_world::products::group_members::dated(source, query, load, params.countries.as_deref(), params.group.as_ref(), cancelled)?;
-    Ok(Prepared { tail: tail(source, query, branch, load, cancelled)?, selection, places: Mutex::default() })
+    Ok(Prepared { tail: tail(source, query, branch, &Content::load(source, load), cancelled)?, selection, places: Mutex::default() })
 }
 
 fn build_row(
@@ -1037,7 +1038,8 @@ pub struct ConstructionLogTail;
 
 impl Product for ConstructionLogTail {
     const PREPARE: Option<dashboard_base::products::read_ahead::Prepare<Self::Params>> = Some(|source, params, load| {
-        if params.place_names == Some(true) { place_name_runs::prepare(source, load) } else { Ok(None) }
+        let places = if params.place_names == Some(true) { place_name_runs::prepare(source, load)? } else { None };
+        dashboard_base::products::read_ahead::together(places, super::prepare_naming(source, load)?)
     });
     const KEY: &'static str = "construction-log-tail";
     const CONTENT_DEPENDENT: bool = true;
@@ -1112,10 +1114,51 @@ pub fn dated_panel(source: &Arc<Source>, load: &LoadContext, asked: &serde_json:
     request.as_object_mut().ok_or("Invalid construction-log-tail panel")?.remove("panel");
     let params: ConstructionLogTailParams = dashboard_query::named::named(&request).map_err(|error| format!("Invalid construction-log-tail panel: {error}"))?;
     ConstructionLogTail::validate(&params)?;
-    let ready = ConstructionLogTail::PREPARE.expect("construction log preparation")(source, &params, load).map_err(|error| error.to_string())?;
+    let places = if params.place_names == Some(true) {
+        place_name_runs::prepare(source, load).map_err(|error| error.to_string())?
+    } else { None };
+    let Some(artwork) = super::prepare_naming(source, load).map_err(|error| error.to_string())? else {
+        return place_name_runs::prepared_panel(places, open(source, load, params, None)?);
+    };
     let branch = params.branch_id.parse().map_err(|_| "Invalid branch")?;
     let query = dashboard_base::queries::query(source, branch).map_err(|error| error.to_string())?;
-    let (finish, prepared) = dashboard_base::products::Finish::open(source, load, ConstructionLogTail::CONTENT_DEPENDENT, || prepare(source, &query, branch, load, &params, &AtomicBool::new(false)));
+    let (selection, notes) = catalogue::capture(|| dashboard_world::products::group_members::dated(
+        source, &query, load, params.countries.as_deref(), params.group.as_ref(), &AtomicBool::new(false),
+    ));
+    let selection = selection.map_err(|error| error.to_string())?;
+    let ready = Arc::<Preparation>::default();
+    let readers = Arc::<OnceLock<(ProductReader, ExactReader)>>::default();
+    let (build, source, load) = (Arc::clone(&readers), Arc::downgrade(source), LoadContext { content: load.content.clone() });
+    ready.start("construction log panel preparation", move || {
+        artwork.wait()?;
+        let source = source.upgrade().ok_or(io::ErrorKind::Interrupted)?;
+        let panel = source.in_scope(|| open(&source, &load, params, Some((selection, notes)))).map_err(io::Error::other)?;
+        let exact = panel.exact().expect("construction log has an exact reader");
+        if let Some(places) = places { places.wait()?; }
+        let _ = build.set((Arc::clone(&exact.advance), Arc::clone(&exact.cold)));
+        Ok(())
+    });
+    let cold = Arc::clone(&readers);
+    place_name_runs::prepared_panel(Some(ready), product_panel(
+        Arc::new(move |hour, seed, cancelled, step| readers.get().expect("prepared construction log").0(hour, seed, cancelled, step)),
+        Arc::new(move |hour, cancelled| cold.get().expect("prepared construction log").1(hour, cancelled)),
+    ))
+}
+
+fn open(source: &Arc<Source>, load: &LoadContext, params: ConstructionLogTailParams, captured: Option<(Option<Selection>, catalogue::OwnRefusals)>) -> Result<Box<dyn Panel>, String> {
+    let branch = params.branch_id.parse().map_err(|_| "Invalid branch")?;
+    let query = dashboard_base::queries::query(source, branch).map_err(|error| error.to_string())?;
+    let cancelled = AtomicBool::new(false);
+    let (finish, prepared) = dashboard_base::products::Finish::open(source, load, ConstructionLogTail::CONTENT_DEPENDENT, || {
+        if let Some((selection, notes)) = captured {
+            catalogue::credit(&notes);
+            let catalogue = catalogue::bound_catalogue(source, load.content()?).ok_or(io::ErrorKind::Interrupted)?;
+            let content = Content { catalogue: catalogue.map_err(|error| error.to_string()) };
+            Ok(Prepared { tail: tail(source, &query, branch, &content, &cancelled)?, selection, places: Mutex::default() })
+        } else {
+            prepare(source, &query, branch, load, &params, &cancelled)
+        }
+    });
     let mut prepared = prepared.map_err(|error| error.to_string())?;
     if params.place_names == Some(true) {
         let mut places = RowNames::following();
@@ -1127,7 +1170,7 @@ pub fn dated_panel(source: &Arc<Source>, load: &LoadContext, asked: &serde_json:
     let owned = Owned { replay: source.replay(), timeline: Arc::clone(&query.timeline), holders: Arc::clone(&query.holders) };
     let opened = (params.place_names == Some(true)).then(|| Arc::downgrade(source));
     let panel_load = LoadContext { content: load.content.clone() };
-    place_name_runs::prepared_panel(ready, occurrences::occurrence_panel(source.tables(), finish, move |hour, cancelled| {
+    Ok(occurrences::occurrence_panel(source.tables(), finish, move |hour, cancelled| {
         let query = Query { replay: &owned.replay, timeline: Arc::clone(&owned.timeline), holders: Arc::clone(&owned.holders) };
         let hour = occurrences::cutoff(&query, Some(hour))?;
         let source = opened.as_ref().map(|source| source.upgrade().ok_or_else(|| io::Error::other("Recording closed"))).transpose()?;
@@ -1344,9 +1387,15 @@ mod tests {
         let source = Arc::new(source);
         let cancelled = AtomicBool::new(false);
         let panel = dated_panel(&source, &load, &serde_json::json!({ "panel": "construction-log-tail", "branchId": "1", "limit": 64, "placeNames": true })).unwrap();
-        if let Some(ready) = place_name_runs::prepare(&source, &load).unwrap() { ready.wait().unwrap(); }
         let reader = panel.exact().unwrap();
-        let seed = (reader.advance)(718, true, &cancelled, None);
+        let mut seed = (reader.advance)(718, true, &cancelled, None);
+        if seed.pending {
+            let wake = panel.pending_preparation().and_then(|prepare| prepare(718)).expect("pending construction panel has preparation");
+            let (ready, waited) = std::sync::mpsc::sync_channel(1);
+            wake(Arc::new(move || { let _ = ready.send(()); }));
+            waited.recv().unwrap();
+            seed = (reader.advance)(718, true, &cancelled, None);
+        }
         let seed = seed.value.as_ref().as_ref().unwrap();
         assert_eq!(seed["rows"][0]["place"]["name"], "North Reach");
         let (followed, warm) = count_reads(|| (reader.advance)(720, false, &cancelled, None));

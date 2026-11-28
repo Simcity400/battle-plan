@@ -140,6 +140,18 @@ impl Product for CountryFlags {
     const KEY: &'static str = "country-flags";
     const CONTENT_DEPENDENT: bool = true;
     const INTERACTIVE: bool = true;
+    const PREPARE: Option<dashboard_base::products::read_ahead::Prepare<Self::Params>> = Some(|source, params, load| {
+        if !matches!(params.size, CountryFlagSize::Shield | CountryFlagSize::Panel) {
+            return Ok(None);
+        }
+        dashboard_base::products::artwork::prepare_artwork_for::<ShieldStyle>(source, load, |source, catalogue| {
+            let style = shield_for(source, catalogue);
+            if let Ok(style) = style {
+                let layers = style.recorded.as_ref().map_or(catalogue.content.layers.presentation(), |(layers, _)| layers);
+                style.shield.prepare(layers, style.decode);
+            }
+        })
+    });
     type Params = CountryFlagParams;
     const FIELDS: dashboard_base::products::Fields = dashboard_base::fields![flags, size];
     type Reply = CountryFlagReply;
@@ -232,17 +244,17 @@ impl Product for CountryFlags {
                 loaded
             }
         };
+        drop(state);
         context.cell_fallbacks.credit();
-        let mut load_shield = || -> io::Result<Arc<ShieldStyle>> {
+        let load_shield = || -> io::Result<Arc<ShieldStyle>> {
             let catalogue = dashboard_base::catalogue::catalogue(source, content)?;
-            cached_shield(&mut state.shield, &catalogue)
+            shield_for(source, &catalogue)
         };
         let shield = matches!(
             params.size,
             CountryFlagSize::Shield | CountryFlagSize::Panel
         )
         .then(|| load_shield().map_err(|error| error.to_string()));
-        drop(state);
         context.reply(
             params,
             shield
@@ -251,6 +263,11 @@ impl Product for CountryFlags {
             cancelled,
         )
     }
+}
+
+fn shield_for(source: &Source, catalogue: &Catalogue) -> io::Result<Arc<ShieldStyle>> {
+    let state = source.state::<Option<CachedShield>>();
+    cached_shield(&mut state.lock().unwrap_or_else(|error| error.into_inner()), catalogue)
 }
 
 fn cached_shield(
@@ -286,7 +303,6 @@ fn cached_shield(
 struct FlagState {
     current: Option<Arc<FlagContext>>,
     earlier: Vec<Weak<FlagContext>>,
-    shield: Option<CachedShield>,
 }
 
 impl FlagState {

@@ -65,6 +65,16 @@ impl MaskedShield {
         }
     }
 
+    pub fn prepare(&self, layers: &ResolvedLayers, decode: Decode) {
+        let mut effects = vec![self.effect.as_slice()];
+        if self.overlay.is_some() {
+            effects.push(SHIELD_OVERLAY_EFFECT.as_bytes());
+        }
+        for effect in effects {
+            let _ = shader_pipeline::artwork::prepare_sprite(layers, effect, decode);
+        }
+    }
+
     pub fn draw(
         &self,
         layers: &ResolvedLayers,

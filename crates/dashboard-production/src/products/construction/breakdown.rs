@@ -44,6 +44,8 @@ pub struct ConstructionBreakdown;
 impl Product for ConstructionBreakdown {
     const KEY: &'static str = "construction-breakdown";
     const CONTENT_DEPENDENT: bool = true;
+    const PREPARE: Option<dashboard_base::products::read_ahead::Prepare<Self::Params>> =
+        Some(|source, _, load| super::prepare_naming(source, load));
     type Params = ConstructionBreakdownParams;
     const FIELDS: dashboard_base::products::Fields = dashboard_base::fields![branchId, country, hour: End];
     type Reply = ConstructionBreakdownReply;

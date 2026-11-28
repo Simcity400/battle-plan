@@ -429,6 +429,8 @@ impl AtHour for AirAcesAt {
     const KEY: &'static str = "air-aces";
     const TITLE: &'static str = "Aces";
     const CONTENT_DEPENDENT: bool = true;
+    const PREPARE: Option<dashboard_base::products::at_hour::PrepareHour<Self::Params>> =
+        Some(|source, _, load, _| dashboard_base::products::artwork::prepare_artwork(source, load));
     type Params = AirAcesParams;
     const FIELDS: dashboard_base::products::Fields = dashboard_base::fields![branchId];
     type Reply = AirAcesReply;
