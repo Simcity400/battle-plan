@@ -2,7 +2,7 @@ import { colour } from '../../charts/palette.ts';
 import type { BarsWidgetDeclaration } from '../../families/bars/declaration.ts';
 import { GROUP_EMPTY } from '../../families/bars/forceAtRace.ts';
 import { seriesRaceSelection, seriesRaceUnavailable, seriesRaceWarnings, type SeriesRaceBaseOptions } from '../../families/bars/seriesRace.ts';
-import { barsLabelText, type BarsDataRow, type BarsModel, type BarsProjection, type BarsSegment } from '../../families/bars/model.ts';
+import { barsLabelText, type BarsDataRow, type BarsModel, type BarsPartReading, type BarsProjection, type BarsSegment } from '../../families/bars/model.ts';
 import { registerFamilyProjection } from '../../families/registry.ts';
 import type { BoundedReadView } from '../../families/contract.ts';
 import type { TooltipListItem } from '../../families/host/tooltips.ts';
@@ -33,32 +33,17 @@ function makeRow(
   const tooltipItems: TooltipListItem[] = [
     { label: 'Nuclear stockpile', value: formatScalar(row.total, 'integer') },
   ];
-  let segments: BarsSegment[] | undefined;
-  if (split && row.total > 0 && row.counts.length > 0) {
-    const positive = row.counts.filter(count => count.value > 0);
-    if (positive.length) {
-      segments = positive.map(count => {
-        const info = types.get(count.ordinal) ?? { label: `Unnamed nuclear type ${count.ordinal}`, color: colour(surface, count.ordinal) };
-        const text = count.ready > 0
-          ? `${formatScalar(count.value, 'integer')} (${formatScalar(count.ready, 'integer')} ready)`
-          : formatScalar(count.value, 'integer');
-        tooltipItems.push({ label: info.label, swatch: info.color, value: text });
-        return {
-          key: String(count.ordinal),
-          label: info.label,
-          share: count.value / row.total,
-          value: knownValue(count.value),
-          format: { decimals: 0 },
-          color: info.color,
-        };
-      });
-    }
-  } else if (row.counts.length > 0) {
-    row.counts.forEach(count => {
-      if (count.value <= 0) return;
-      const info = types.get(count.ordinal) ?? { label: `Unnamed nuclear type ${count.ordinal}`, color: colour(surface, count.ordinal) };
-      tooltipItems.push({ label: info.label, value: formatScalar(count.value, 'integer') });
-    });
+  const segments: BarsSegment[] = [];
+  const partReadings: BarsPartReading[] = [];
+  const splitFill = split && row.total > 0;
+  for (const count of row.counts) {
+    const { label, color } = types.get(count.ordinal) ?? { label: `Unnamed nuclear type ${count.ordinal}`, color: colour(surface, count.ordinal) };
+    const reading = { key: String(count.ordinal), label, value: knownValue(count.value), format: { decimals: 0 } };
+    partReadings.push(reading);
+    const amount = formatScalar(count.value, 'integer');
+    const detail = splitFill && count.ready > 0 ? `${amount} (${formatScalar(count.ready, 'integer')} ready)` : amount;
+    tooltipItems.push({ label, ...(splitFill ? { swatch: color } : {}), value: detail });
+    if (splitFill && count.value > 0) segments.push({ ...reading, share: count.value / row.total, color });
   }
   return {
     kind: 'data',
@@ -69,7 +54,8 @@ function makeRow(
     ...(pres.color ? { color: pres.color } : {}),
     value: { value, format: { decimals: 0 }, label: 'Nuclear stockpile' },
     numeric: row.total,
-    ...(segments ? { segments } : {}),
+    ...(segments.length ? { segments } : {}),
+    ...(partReadings.length ? { partReadings } : {}),
     tooltip: {
       title: barsLabelText(pres.label),
       hour: readView.hour,

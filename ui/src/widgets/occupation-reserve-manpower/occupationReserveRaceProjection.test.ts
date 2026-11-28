@@ -5,7 +5,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { createServer } from 'vite';
 import { countryKey } from '../../dashboard/countryKey.ts';
 import { barsHostAdapter } from '../../families/bars/hostAdapter.ts';
-import { assertBarsModelValid, barsLabelText, deriveBarsTooltip, type BarsDataRow } from '../../families/bars/model.ts';
+import { assertBarsModelValid, barsLabelText, deriveBarsAudit, deriveBarsMirror, deriveBarsTooltip, type BarsDataRow } from '../../families/bars/model.ts';
 import { buildTooltipContent } from '../../families/host/tooltips.ts';
 import { tooltipText } from '../../charts/tooltip.ts';
 import { createBoundedReadView, displayedHour } from '../../families/boundedView.ts';
@@ -95,6 +95,8 @@ test('occupation-reserve-manpower race preserves Rust ranking, builds source-cou
   assert.deepEqual(rows.map(r => [r.key, r.numeric]), [['AAA', 500], ['DDD', 250]]);
   assert.deepEqual(rows[0]!.segments?.map(s => [s.key, s.share]), [['CCC', 1]]);
   assert.ok(rows[0]!.tooltip?.items?.some(item => item.label === 'Negative entries'));
+  assert.equal(deriveBarsMirror(model).rows[0]?.cells.find(cell => cell.column === 'segments')?.spoken, 'Beta \u221250, Gamma 300, Gamma 200');
+  assert.equal(deriveBarsAudit(model).find(cell => cell.key === 'AAA:part:0')?.value, '["known",["int","-50"]]');
   assert.ok(model.warnings?.some(w => w.includes('1 holders')));
 
   const pendingSourceIdentity: IdentityProvider = {

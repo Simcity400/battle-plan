@@ -4,7 +4,7 @@ import { countryKey } from '../../dashboard/countryKey.ts';
 import type { BarsWidgetDeclaration } from '../../families/bars/declaration.ts';
 import { forceAtSources, GROUP_EMPTY } from '../../families/bars/forceAtRace.ts';
 import { seriesRaceSelection, seriesRaceUnavailable, seriesRaceWarnings, type SeriesRaceBaseOptions } from '../../families/bars/seriesRace.ts';
-import { barsLabelText, countryRowPresentation, type BarsDataRow, type BarsModel, type BarsProjection, type BarsSegment } from '../../families/bars/model.ts';
+import { barsLabelText, countryRowPresentation, type BarsDataRow, type BarsModel, type BarsPartReading, type BarsProjection, type BarsSegment } from '../../families/bars/model.ts';
 import { registerFamilyProjection } from '../../families/registry.ts';
 import type { BoundedReadView, FamilyPlanContext, SourcePlan } from '../../families/contract.ts';
 import type { TooltipListItem } from '../../families/host/tooltips.ts';
@@ -57,10 +57,12 @@ function makeHolderRow(readView: BoundedReadView, holder: ReserveHolder, readHou
   const value = total === 0 ? zeroValue() : knownValue(total);
 
   const bySource = new Map<string, { readonly label: string; readonly color: string; amount: number }>();
+  const partReadings: BarsPartReading[] = [];
   const positiveItems: TooltipListItem[] = [];
   const negativeItems: TooltipListItem[] = [];
   for (const entry of holder.entries) {
     const src = sourcePresentation(readView, entry.source, surface);
+    partReadings.push({ key: String(entry.ordinal), label: src.label, value: knownValue(entry.amount) });
     if (entry.amount > 0) {
       const existing = bySource.get(src.key);
       if (existing) existing.amount += entry.amount;
@@ -104,6 +106,7 @@ function makeHolderRow(readView: BoundedReadView, holder: ReserveHolder, readHou
     value: { value, format: { decimals: 0 }, label: 'Reserve manpower' },
     numeric: total,
     ...(segments ? { segments } : {}),
+    ...(partReadings.length ? { partReadings } : {}),
     tooltip: {
       title: barsLabelText(pres.label),
       hour: readView.hour,
