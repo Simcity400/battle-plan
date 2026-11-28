@@ -19,7 +19,7 @@ fn tooltip_projection_retains_effects_modifiers_and_real_balance_category_bindin
     std::fs::create_dir_all(root.join("common/bop")).unwrap();
     std::fs::write(
         root.join("common/decisions/categories/a.txt"),
-        b"SYN_CATEGORY={name=IGNORED power_balance=IGNORED allowed={always=yes} visible={always=no} available={always=yes}} SYN_OTHER={}",
+        b"SYN_CATEGORY={name=IGNORED power_balance=IGNORED allowed={always=yes} visible={always=no} available={always=yes}} SYN_OTHER={visible=no}",
     )
     .unwrap();
     std::fs::write(
@@ -27,7 +27,7 @@ fn tooltip_projection_retains_effects_modifiers_and_real_balance_category_bindin
         b"SYN_BALANCE={decision_category=SYN_CATEGORY}",
     )
     .unwrap();
-    std::fs::write(root.join("common/decisions/a.txt"), b"SYN_CATEGORY={SYN_DECISION={name=SYN_NAME allowed={always=yes} visible={always=no} available={always=yes} activation={always=yes} remove_trigger={always=no} cancel_trigger={always=no} custom_cost_trigger={always=yes} cost=var:cost complete_effect={custom_effect_tooltip=SELECT} remove_effect={custom_effect_tooltip=REMOVE} cancel_effect={custom_effect_tooltip=CANCEL} timeout_effect={custom_effect_tooltip=TIMEOUT} days_remove=var:duration modifier={political_power_gain=1}}} SYN_OTHER={OTHER={}}").unwrap();
+    std::fs::write(root.join("common/decisions/a.txt"), b"SYN_CATEGORY={SYN_DECISION={name=SYN_NAME allowed={always=yes} visible={always=no} available={always=yes} activation={always=yes} remove_trigger={always=no} cancel_trigger={always=no} custom_cost_trigger={always=yes} cost=var:cost complete_effect={custom_effect_tooltip=SELECT} remove_effect={custom_effect_tooltip=REMOVE} cancel_effect={custom_effect_tooltip=CANCEL} timeout_effect={custom_effect_tooltip=TIMEOUT} days_remove=var:duration modifier={political_power_gain=1}}} SYN_OTHER={OTHER={cancel_trigger=yes}}").unwrap();
     let layers = ResolvedLayers::from_folders(&[(&root, &[])]).unwrap();
     let database = read(&layers).unwrap();
     assert_eq!(
@@ -37,25 +37,12 @@ fn tooltip_projection_retains_effects_modifiers_and_real_balance_category_bindin
     let decision = database.decision(b"SYN_DECISION").unwrap().unwrap();
     assert!(decision.power_balance);
     assert_eq!(decision.category, b"syn_category");
-    for body in [
-        &decision.allowed,
-        &decision.visible,
-        &decision.available,
-        &decision.activation,
-        &decision.remove_trigger,
-        &decision.cancel_trigger,
-        &decision.custom_cost_trigger,
-    ] {
-        assert_eq!(body.len(), 1);
-        assert!(body[0].keyword_is("always"));
-    }
     assert_eq!(decision.cost, b"var:cost");
-    assert_eq!(
-        database.category_conditions[b"syn_category".as_slice()]
-            .visible
-            .len(),
-        1
-    );
+    for field in ["visible", "cancel_trigger"] {
+        assert!(database.notes.iter().any(|note| {
+            note.contains(field) && note.contains("where its trigger reads a block")
+        }));
+    }
     assert_eq!(
         decision.complete_effect[0].value.scalar(),
         Some(b"SELECT".as_slice())
@@ -89,9 +76,10 @@ fn decision_projection_preserves_names_seed_and_highlight_inputs() {
             days_mission_timeout = @days fire_only_once = yes
             highlight_states = { highlight_state_targets = {
                 state = var:one state = var:ROOT.two_@FROM
-                target_array = candidate_states targets = { 7 9 }
+                target_array = candidate_states
                 target_root_trigger = { always = yes } target_trigger = { impassable = no }
             } highlight_states_trigger = { is_core_of = ROOT } }
+            highlight_states = { highlight_state_targets = { targets = { 7 9 } } }
         }
         default = { name = "" fire_only_once = yes }
         sample = { name = DUPLICATE }

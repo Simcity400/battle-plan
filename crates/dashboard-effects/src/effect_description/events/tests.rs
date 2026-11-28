@@ -1797,9 +1797,6 @@ fn inactive_decision_skips_unsupported_title_and_empty_trigger_does_not_enable_h
         .unwrap();
     definition.has_state_targets = false;
     definition.target_states.clear();
-    definition.highlight_states = content_reader_parser::parser::parse(b"highlight_states_trigger = {}")
-        .unwrap()
-        .items;
     set::<tables::Decisions>(
         &mut fixture,
         vec![DecisionRow {

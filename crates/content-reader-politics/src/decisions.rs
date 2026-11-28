@@ -20,13 +20,6 @@ pub struct Decision {
     pub id: Vec<u8>,
     pub name: Vec<u8>,
     pub category: Vec<u8>,
-    pub allowed: Vec<Item>,
-    pub visible: Vec<Item>,
-    pub available: Vec<Item>,
-    pub activation: Vec<Item>,
-    pub remove_trigger: Vec<Item>,
-    pub cancel_trigger: Vec<Item>,
-    pub custom_cost_trigger: Vec<Item>,
     pub cost: Vec<u8>,
     pub selectable_mission: bool,
     pub targeted: bool,
@@ -38,7 +31,6 @@ pub struct Decision {
     pub mission: bool,
     pub fixed_random_seed: bool,
     pub has_state_targets: bool,
-    pub highlight_states: Vec<Item>,
     pub highlight_conditions: Vec<Item>,
     pub target_root_trigger: Vec<Item>,
     pub target_trigger: Vec<Item>,
@@ -134,18 +126,10 @@ impl Decision {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct CategoryConditions {
-    pub allowed: Vec<Item>,
-    pub visible: Vec<Item>,
-    pub available: Vec<Item>,
-}
-
-#[derive(Clone, Debug, Default)]
 pub struct Database {
     pub entries: BTreeMap<Vec<u8>, Decision>,
     pub categories: BTreeMap<Vec<u8>, Vec<u8>>,
     power_balance_categories: BTreeSet<Vec<u8>>,
-    pub category_conditions: BTreeMap<Vec<u8>, CategoryConditions>,
     pub notes: Vec<String>,
     unread: Option<String>,
 }
@@ -372,19 +356,6 @@ fn append(
             decision.fixed_random_seed =
                 parser::read_bool_field(fields, "fixed_random_seed", false);
             for field in fields {
-                for (key, body) in [
-                    ("allowed", &mut decision.allowed),
-                    ("visible", &mut decision.visible),
-                    ("available", &mut decision.available),
-                    ("activation", &mut decision.activation),
-                    ("remove_trigger", &mut decision.remove_trigger),
-                    ("cancel_trigger", &mut decision.cancel_trigger),
-                    ("custom_cost_trigger", &mut decision.custom_cost_trigger),
-                ] {
-                    if field.keyword_is(key) {
-                        body.extend_from_slice(field.value.items().unwrap_or_default());
-                    }
-                }
                 if field.keyword_is("cost") {
                     decision.cost = field.value.scalar().unwrap_or_default().to_vec();
                 }
@@ -438,13 +409,12 @@ fn append(
                 {
                     decision.mission = true;
                 }
-                if field.keyword_is("highlight_states") {
-                    decision
-                        .highlight_states
-                        .extend_from_slice(field.value.items().unwrap_or_default());
-                }
             }
-            for field in &decision.highlight_states {
+            let highlights = fields
+                .iter()
+                .filter(|field| field.keyword_is("highlight_states"))
+                .flat_map(|field| field.value.items().unwrap_or_default());
+            for field in highlights {
                 if field.keyword_is("highlight_states_trigger") {
                     decision
                         .highlight_conditions
@@ -571,28 +541,10 @@ pub fn read(layers: &ResolvedLayers) -> io::Result<Database> {
         }));
         for item in &read.items {
             let id = parser::c_string(item.key.as_deref().unwrap_or_default());
-            if database.categories.contains_key(&id.to_ascii_lowercase()) {
-                continue;
-            }
             database
                 .categories
-                .insert(id.to_ascii_lowercase(), id.to_vec());
-            let mut conditions = CategoryConditions::default();
-            for field in item.value.items().unwrap_or_default() {
-                let body = if field.keyword_is("allowed") {
-                    &mut conditions.allowed
-                } else if field.keyword_is("visible") {
-                    &mut conditions.visible
-                } else if field.keyword_is("available") {
-                    &mut conditions.available
-                } else {
-                    continue;
-                };
-                body.extend_from_slice(field.value.items().unwrap_or_default());
-            }
-            database
-                .category_conditions
-                .insert(id.to_ascii_lowercase(), conditions);
+                .entry(id.to_ascii_lowercase())
+                .or_insert_with(|| id.to_vec());
         }
     }
     let mut balances = BTreeMap::new();
