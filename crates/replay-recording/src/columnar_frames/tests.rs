@@ -498,9 +498,10 @@ fn a_damaged_part_refuses_its_table_by_name_and_no_other() {
 
     rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap().install(|| {
         let mut parked = Frames::new(&file, &WATCHED).unwrap();
-        let (first, bytes) = parked.frame_with_parked_readers(1, 0, 300, 1024 * 1024).unwrap();
+        let (first, bytes) = parked.frame_with_parked_readers(1, 0, 299, 1024 * 1024).unwrap();
+        assert!(WATCHED.iter().all(|&table| parked.reader(table).is_some()));
         let mut constrained = Frames::new(&file, &WATCHED).unwrap();
-        let (same_hour, _) = constrained.frame_with_parked_readers(1, 0, 300, bytes.unwrap() - 1).unwrap();
+        let (same_hour, _) = constrained.frame_with_parked_readers(1, 0, 299, bytes.unwrap() - 1).unwrap();
         assert_eq!(first.tables, same_hour.tables);
         assert_eq!(WATCHED.iter().filter(|&&table| constrained.reader(table).is_some()).count(), 1);
         let target = block as u32;

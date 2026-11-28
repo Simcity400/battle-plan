@@ -95,6 +95,7 @@ pub trait AtHour: 'static {
     const INTERACTIVE: bool = true;
     const PREPARE: Option<PrepareHour<Self::Params>> = None;
     const RESET_READERS: Option<fn(&Self::Context)> = None;
+    const RELEASE_ON_GAP: Option<fn(&Source)> = None;
     const FIELDS: super::Fields;
     type Params: DeserializeOwned + Send + 'static;
     type Reply: Serialize + ReplyWarnings + PartialEq + Send + 'static;
@@ -372,6 +373,7 @@ fn load<P: AtHour>(source: &Source, lease_id: &str, mut request: Value, load: &L
     P::validate(&params).map_err(str::to_owned)?;
     super::reply_json(source, lease_id, P::KEY, P::CONTENT_DEPENDENT, load, cancelled, || {
         let query = crate::queries::query(source, dashboard_query::branch(&request)?)?;
+        if let Some(release) = P::RELEASE_ON_GAP && query.timeline.at(hour).is_none() { release(source); }
         let pool = placed::Pool::of(source)?;
         answered::<P, _>(&query, &pool, &params, hour, || P::context_for(source, load, &params), cancelled).map(|(reply, live)| WithLive { reply, live })
     })

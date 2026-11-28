@@ -173,15 +173,12 @@ impl AtHour for CountryFactionGoals {
     const TITLE: &'static str = "Country faction goals";
     const CONTENT_DEPENDENT: bool = true;
     const RESET_READERS: Option<fn(&Self::Context)> = Some(|context| context.inputs().release_world());
+    const RELEASE_ON_GAP: Option<fn(&Source)> = Some(ScriptedInputs::release_world_for);
     const PREPARE: Option<PrepareHour<Self::Params>> = Some(|source, params, load, hour| {
         if load.content.is_none() { return Ok(None); }
         let branch = params.branch_id.parse().map_err(|_| dashboard_core::invalid("Invalid faction branch"))?;
         let query = dashboard_base::queries::query(source, branch)?;
-        let Some(span) = query.timeline.at(hour) else {
-            ScriptedInputs::release_world_for(source);
-            return Ok(None);
-        };
-        ReadDates::prepare_block_dates(source, span.run, DATE_SELECTIONS)
+        query.timeline.at(hour).map_or(Ok(None), |span| ReadDates::prepare_block_dates(source, span.run, DATE_SELECTIONS))
     });
     type Params = CountryFactionGoalsParams;
     const FIELDS: dashboard_base::products::Fields = dashboard_base::fields![branchId, country, goals];

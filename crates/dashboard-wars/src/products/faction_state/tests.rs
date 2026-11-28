@@ -519,11 +519,14 @@ fn scripted_goal_refresh(fixture: &str, condition: &str, unrelated_tokens: bool)
         let stretches = Arc::new(Mutex::new(BTreeMap::<i32, (u64, u64)>::new()));
         let counts = Arc::clone(&stretches);
         let advance = Arc::clone(&panel.advance);
-        let asked = asked.clone();
+        let mut gap_params = params.clone();
+        gap_params["hour"] = json!(last + 1);
         let tracked = dashboard_follow::panel::AtHour {
             advance: Arc::new(move |hour, seed, cancelled, step| {
                 if hour == last && let Some((source, load)) = &gap {
-                    assert!(CountryFactionGoals::PREPARE.unwrap()(source, &asked, load, last + 1).unwrap().is_none());
+                    let refusal = dashboard_base::products::at_hour::entry::<CountryFactionGoals>()
+                        .answer(source, gap_params.clone(), load, cancelled).unwrap_err();
+                    assert!(refusal.to_string().contains("hour is not recorded"));
                 }
                 let (reply, reads) = replay_recording::cells::count_reads(|| advance(hour, seed, cancelled, step));
                 let mut counts = counts.lock().unwrap();
