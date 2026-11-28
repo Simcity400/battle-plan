@@ -227,6 +227,7 @@ export function projectForceAtReply(
     if (value.kind === 'notRecorded' && item.values.some(raw => raw !== null)) tooltipItems.push(...witnessedPartItems(reply, item, config.decimals, config.valueFormat));
     if (options.split && numeric === 0 && item.partsPartial) tooltipItems.push(...witnessedPartItems(reply, item, config.decimals, config.valueFormat));
     let segments: BarsSegment[] | undefined;
+    let segmentsIncomplete = options.split && (item.partsMissing !== null || item.partsPartial?.some(Boolean) === true);
     if (options.split && numeric !== null && numeric > 0) {
       if (item.partsMissing !== null) {
         tooltipItems.push({ label: config.partsLabel, missingReason: item.partsMissing }, ...witnessedPartItems(reply, item, config.decimals, config.valueFormat));
@@ -246,6 +247,7 @@ export function projectForceAtReply(
           partEntries.push({ part: reply.parts[i]!, color: colours[i]!, scaled });
         }
         if (anyMissing) {
+          segmentsIncomplete = true;
           tooltipItems.push({ label: config.partsLabel, missingReason: 'Parts not recorded at this hour' });
         } else {
           for (const entry of partEntries) {
@@ -263,7 +265,7 @@ export function projectForceAtReply(
           }
           if (built.length) segments = built;
         }
-      }
+      } else segmentsIncomplete = true;
     }
 
     rows.push({
@@ -276,6 +278,7 @@ export function projectForceAtReply(
       value: { value, format: config.valueFormat, label: config.valueLabel },
       numeric,
       ...(segments ? { segments } : {}),
+      ...(segmentsIncomplete ? { segmentsIncomplete: true } : {}),
       tooltip: {
         title: barsLabelText(pres.label),
         hour,

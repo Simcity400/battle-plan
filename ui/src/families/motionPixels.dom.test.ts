@@ -18,19 +18,19 @@ async function motionBrowser(url: string) {
 
 test('ordered bars settle to the same pixels as a cold draw after worker playback', async () => {
   await withNativePage('ordered-bars-pixel-settle', '/ui/src/families/motionPixels.dom.fixture.ts', async page => {
-    for (const withTarget of [false, true]) {
+    for (const form of [true, 'target-markers', 'ordered-segments']) {
       const { results, tinyEndpoints, histories, afterScroll, afterResize, afterTick, afterRefusal } = await page.evaluate<{
         results: { dpr: number; moving: number; paused: number }[];
         tinyEndpoints: { dpr: number; first: number; last: number }[];
         histories: { revoked: boolean; history: string; difference: number }[];
         afterScroll: number; afterResize: number; afterTick: number; afterRefusal: number;
-      }>(`window.checkSettledPixels(${withTarget})`);
+      }>(`window.checkSettledPixels(${JSON.stringify(form)})`);
       for (const result of results) {
-        const detail = `DPR ${result.dpr}, with target ${withTarget}`;
+        const detail = `DPR ${result.dpr}, form ${form}`;
         assert.ok(result.moving > 0, `no movement at ${detail}`);
         assert.equal(result.paused, 0, `paused picture differs at ${detail}`);
       }
-      if (withTarget) assert.equal(tinyEndpoints.length, 8);
+      if (form !== true) assert.equal(tinyEndpoints.length, 8);
       for (const { dpr, first, last } of tinyEndpoints) assert.deepEqual([first, last], [0, 0], `tiny target endpoints at DPR ${dpr}`);
       for (const sample of histories) assert.equal(sample.difference, 0, `${sample.history} with endpoint refusal ${sample.revoked}`);
       assert.equal(afterScroll, 0, 'layout must not copy other pixels into the owned slot');
@@ -56,6 +56,17 @@ test('a moving target clears the recorded readout until the plot widens at the n
       assert.ok(barRight > previous && barRight < readoutLeft, `bar ${barRight}, readout ${readoutLeft} at ${fraction}`);
       assert.equal(readoutDifference, 0, `recorded readout pixels at ${fraction}`);
       previous = barRight;
+    }
+  });
+});
+
+test('an ordered split confines a subpixel hatched tail to its painted edge', async () => {
+  await withNativePage('ordered-segment-hatch-edge', '/ui/src/families/motionPixels.dom.fixture.ts', async page => {
+    const samples = await page.evaluate<{ dpr: number; moving: boolean; inside: number; outside: number }[]>('window.checkSubpixelHatchTail()');
+    for (const { dpr, moving, inside, outside } of samples) {
+      const at = `${moving ? 'moving' : 'cold'} split at DPR ${dpr}`;
+      assert.ok(inside > 0, `the hatch is visible inside the ${at}`);
+      assert.equal(outside, 0, `background just beyond the ${at}`);
     }
   });
 });

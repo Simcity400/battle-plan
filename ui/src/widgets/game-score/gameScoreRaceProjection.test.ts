@@ -57,6 +57,7 @@ test('game-score race keeps the product order, keys rows by recorded slot, and s
   ]);
   assert.deepEqual(rows[0]!.segments?.map(segment => [segment.key, Math.round(segment.share * 100)]), [['army', 38], ['navy', 38], ['air', 25]]);
   assert.equal(rows[1]!.segments, undefined, 'a missing part leaves the bar whole: the known parts are never stretched to fill it');
+  assert.equal(rows[1]!.segmentsIncomplete, true);
   assert.deepEqual(rows[1]!.tooltip?.items?.find(item => item.label === 'Air'), { label: 'Air', swatch: rows[0]!.segments![2]!.color, missingReason: 'Scores were not read at this hour' });
   assert.throws(() => shown.who('country', 'GER', displayedHour(501)), FutureDataError);
 });

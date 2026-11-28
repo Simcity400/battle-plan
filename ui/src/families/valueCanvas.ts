@@ -58,8 +58,6 @@ export function drawHatchRect(
   ctx.roundRect(x, y, width, height, radius);
   ctx.clip();
   drawHatchLines(ctx, x, y, width, height, theme);
-  ctx.restore();
-  ctx.save();
   ctx.strokeStyle = theme.hatchEdge ?? theme.hatch;
   ctx.globalAlpha = 0.35;
   ctx.lineWidth = 1;

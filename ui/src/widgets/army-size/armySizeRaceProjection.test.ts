@@ -64,6 +64,7 @@ test('army-size race and mix split battalion unit groups from army-at and withho
   const raceRows = race.rows.filter((r): r is BarsDataRow => r.kind === 'data');
   assert.deepEqual(raceRows[0]!.segments?.map(s => [s.label, Math.round(s.share * 100)]), [['Infantry', 75], ['Armor', 25]]);
   assert.equal(raceRows[1]!.segments, undefined);
+  assert.equal(raceRows[1]!.segmentsIncomplete, true);
 
   const mix = armySizeMixProjection.project(view, { surface: '#1e1e1e', countFor: 'owner', top: 10, all: false, group: false });
   assertBarsModelValid(mix, 300);

@@ -111,7 +111,7 @@ export interface LaneFamily<TBinding extends LaneBinding, TModel, TLayout> {
     enabled(binding: TBinding): boolean;
     supports(model: TModel, form: BarsPlaybackForm): boolean;
     unavailable(model: TModel): boolean;
-    frame(frame: LaneFrame<TBinding, TModel, TLayout>, next: TModel, fraction: number, nextLayout: () => TLayout, diagnostic?: MotionSampleDiagnostic): LaneFrame<TBinding, TModel, TLayout> | false | null;
+    frame(frame: LaneFrame<TBinding, TModel, TLayout>, next: TModel, fraction: number, nextLayout: () => TLayout, form: BarsPlaybackForm, diagnostic?: MotionSampleDiagnostic): LaneFrame<TBinding, TModel, TLayout> | false | null;
   };
   layout(model: TModel, binding: TBinding, surface: Surface, theme: FamilyTheme, measure: OffscreenCanvasRenderingContext2D, hour: number, step: LaneStep<TModel, TLayout>): TLayout;
   keepsCanvas?(ctx: OffscreenCanvasRenderingContext2D, frame: LaneFrame<TBinding, TModel, TLayout>): boolean;
@@ -492,7 +492,7 @@ export function createLaneView<TBinding extends LaneBinding, TModel, TLayout>(
   const reportInvalidPlayback = (binding: TBinding, form: BarsPlaybackForm) => {
     if (invalidPlayback.has(binding)) return;
     invalidPlayback.add(binding);
-    console.error(`Bars projection ${binding.kind}/${binding.view ?? 'main'} produced a form outside its ${form === true ? 'single-value' : 'target-marker'} guarantee`);
+    console.error(`Bars projection ${binding.kind}/${binding.view ?? 'main'} produced a form outside its ${form === true ? 'single-value' : form === 'target-markers' ? 'target-marker' : 'ordered-segment'} guarantee`);
   };
   const sameInputs = (held: Held<TBinding, TModel, TLayout>, binding: TBinding, scene: Scene, hour: number): boolean =>
     held.projected !== null
@@ -1047,7 +1047,7 @@ export function createLaneView<TBinding extends LaneBinding, TModel, TLayout>(
           if (invalidPlayback.has(binding)) return 'release';
           const fraction = to && next ? (position - begin) / (next.hour - begin) : 0;
           const recorded = { ...frame, hour: exact.from, model: exact.model, layout: layoutOf(exact), projected: exact.projected, inspect };
-          const moving = to && !animation.unavailable(to.model) ? animation.frame(recorded, to.model, fraction, () => layoutOf(to), diagnostic) : null;
+          const moving = to && !animation.unavailable(to.model) ? animation.frame(recorded, to.model, fraction, () => layoutOf(to), form, diagnostic) : null;
           if (diagnostic && next) {
             diagnostic.reason = position <= begin ? 'recordedHour' : !to ? 'modelValidity' : moving === null ? 'incompatible' : 'unchanged';
           }

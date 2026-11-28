@@ -739,6 +739,15 @@ export interface SplitBarSegment {
   readonly hatched?: boolean;
 }
 
+export function splitBarWidths(x: number, width: number, fractions: readonly number[]): readonly number[] {
+  let cursor = x;
+  return fractions.map(fraction => {
+    const segmentWidth = Math.min(x + width - cursor, width * fraction);
+    if (segmentWidth > 0) cursor += segmentWidth;
+    return Math.max(0, segmentWidth);
+  });
+}
+
 export function drawSplitBar(
   ctx: Canvas2D,
   x: number,
@@ -747,7 +756,7 @@ export function drawSplitBar(
   height: number,
   segments: readonly SplitBarSegment[],
   theme: FamilyTheme,
-  options?: { readonly gap?: number },
+  options?: { readonly gap?: number; readonly widths?: readonly number[] },
 ): void {
   if (width <= 0 || height <= 0) return;
   const active = segments.filter(s => s.fraction > 0);
@@ -773,10 +782,11 @@ export function drawSplitBar(
     return;
   }
   const radius = barCornerRadius(height);
+  const widths = options?.widths ?? splitBarWidths(x, width, active.map(segment => segment.fraction));
   let cursor = x;
   for (let i = 0; i < active.length; i++) {
     const segment = active[i]!;
-    const segW = Math.min(x + width - cursor, width * segment.fraction);
+    const segW = widths[i]!;
     if (segW <= 0) continue;
     const isLast = i === active.length - 1;
     if (segment.hatched) {

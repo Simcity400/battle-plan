@@ -81,7 +81,7 @@ function makeRow(
 export const nuclearArsenalRaceProjection: BarsProjection<NuclearArsenalRaceOptions> = registerFamilyProjection({
   kind: 'nuclear-arsenal',
   family: 'bars',
-  singleValueBars: options => !options.split,
+  singleValueBars: options => options.split ? 'ordered-segments' : true,
   nextChange: () => Infinity,
   project(readView: BoundedReadView, options: NuclearArsenalRaceOptions): BarsModel {
     const hour = readView.hour;

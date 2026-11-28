@@ -30,7 +30,7 @@ function totalsFamily(measure: AirForceMeasureOption, ownership: AirForceOwnersh
 export const airForceSizeRaceProjection: BarsProjection<AirForceSizeRaceOptions> = registerFamilyProjection({
   kind: 'air-force-size',
   family: 'bars',
-  singleValueBars: options => !options.split,
+  singleValueBars: options => options.split ? 'ordered-segments' : true,
   nextChange: () => Infinity,
   project(readView: BoundedReadView, options: AirForceSizeRaceOptions): BarsModel {
     const scaleUnit = options.measure === 'wings' ? 'Air wings' : 'Planes';

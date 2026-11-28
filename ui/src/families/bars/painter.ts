@@ -65,6 +65,7 @@ export interface BarsEasedRow {
   readonly rightSideFrac?: number;
   readonly targetFrac?: number;
   readonly orderedGeometry?: OrderedBarGeometry;
+  readonly segmentWidths?: readonly number[];
   readonly segmentShares?: Readonly<Record<string, number>>;
 }
 
@@ -750,8 +751,8 @@ export function drawFamilyBars(ctx: Canvas2D, input: DrawFamilyBarsInput): BarsP
     let drawnEndX: number;
     const targetFrac = row.target && row.target.numeric > 0 ? eased?.targetFrac ?? row.target.numeric / layout.scaleMax : undefined;
     if (targetFrac === undefined && row.segments?.length) {
-      const totalFrac = eased?.numericFrac !== undefined ? eased.numericFrac : Math.max(0, row.numeric ?? 0) / layout.scaleMax;
-      const totalBarW = totalFrac > 0 ? Math.min(layout.plotWidth, Math.max(2, totalFrac * layout.plotWidth)) : 0;
+      const totalFrac = eased?.numericFrac ?? (row.numeric ?? 0) / layout.scaleMax;
+      const totalBarW = eased?.orderedGeometry?.fill ?? orderedBarGeometry(layout.plotWidth, totalFrac).fill;
       if (totalBarW > 0) {
         drawSplitBar(
           ctx,
@@ -761,6 +762,7 @@ export function drawFamilyBars(ctx: Canvas2D, input: DrawFamilyBarsInput): BarsP
           layout.barHeight,
           row.segments.map(seg => ({ fraction: seg.share, fill: seg.color, hatched: seg.hatched })),
           theme,
+          { widths: eased?.segmentWidths },
         );
       }
       drawnEndX = layout.plotLeft + totalBarW;

@@ -45,7 +45,8 @@ function splitParts(surface: string, reply: SeriesRankReply, row: SeriesRankRow)
     known.push({ part, color, amount });
   });
   const sum = known.reduce((total, part) => total + part.amount, 0);
-  if (known.length < SPLIT_PARTS.length || sum <= 0) return { items };
+  if (known.length < SPLIT_PARTS.length) return { items, segmentsIncomplete: true };
+  if (sum <= 0) return { items };
   const segments: BarsSegment[] = known.filter(part => part.amount > 0).map(part => ({
     key: part.part,
     label: SCORE_LABELS[part.part],
@@ -60,7 +61,7 @@ function splitParts(surface: string, reply: SeriesRankReply, row: SeriesRankRow)
 export const gameScoreRaceProjection: BarsProjection<GameScoreRaceOptions> = registerFamilyProjection({
   kind: 'game-score',
   family: 'bars',
-  singleValueBars: options => !splits(options),
+  singleValueBars: options => splits(options) ? 'ordered-segments' : true,
   nextChange: () => Infinity,
   project(readView: BoundedReadView, options: GameScoreRaceOptions): BarsModel {
     return projectSeriesRace(readView, options, {

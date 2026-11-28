@@ -1,5 +1,7 @@
 import { LABEL_WEIGHT } from '../../charts/draw.ts';
 import { textWidth } from '../../charts/textWidth.ts';
+import { splitBarWidths } from '../../draw/kit.ts';
+import type { BarsPlaybackForm } from '../contract.ts';
 import type { LaneBinding, LaneFamily, LaneFrame } from '../laneRuntime.ts';
 import type { MotionSampleDiagnostic } from '../motion.ts';
 import { glideDurationForSpeed } from '../table/painter.ts';
@@ -199,6 +201,16 @@ function measuredTarget(target: NonNullable<BarsDataRow['target']>): boolean {
     && (target.value.kind === 'known' || target.value.kind === 'zero') && typeof target.value.value !== 'string';
 }
 
+function compatibleSegments(first: NonNullable<BarsDataRow['segments']>, second: NonNullable<BarsDataRow['segments']>): boolean {
+  return first.length === second.length && first.every((segment, i) => {
+    const next = second[i]!;
+    return segment.key === next.key && segment.label === next.label && segment.color === next.color
+      && Boolean(segment.hatched) === Boolean(next.hatched) && sameFormat(segment.format, next.format)
+      && segment.share > 0 && next.share > 0
+      && segment.value.kind === 'known' && next.value.kind === 'known';
+  });
+}
+
 function matchingRows(first: BarsModel, second: BarsModel, diagnostic?: MotionSampleDiagnostic): readonly BarsRow[] | null {
   if (first === second) return second.rows;
   if (first.showAxis !== second.showAxis || first.rowHeight !== second.rowHeight || first.barHeight !== second.barHeight
@@ -258,7 +270,7 @@ function matchingRows(first: BarsModel, second: BarsModel, diagnostic?: MotionSa
   return endpoints;
 }
 
-function orderedMotion(frame: BarsFrame, next: BarsModel, fraction: number, nextLayout: () => BarsLayout, diagnostic?: MotionSampleDiagnostic): BarsFrame | false | null {
+function orderedMotion(frame: BarsFrame, next: BarsModel, fraction: number, nextLayout: () => BarsLayout, form: BarsPlaybackForm, diagnostic?: MotionSampleDiagnostic): BarsFrame | false | null {
   const current = frame.model;
   const endpoints = matchingRows(current, next, diagnostic);
   if (!endpoints) return null;
@@ -279,10 +291,21 @@ function orderedMotion(frame: BarsFrame, next: BarsModel, fraction: number, next
       || !row.value || !end.value
       || (row.value.value.kind !== 'zero' && row.value.value.kind !== 'known')
       || (end.value.value.kind !== 'zero' && end.value.value.kind !== 'known')) return null;
+    if (form === 'ordered-segments' && (row.segmentsIncomplete || end.segmentsIncomplete || (row.numeric < 0) !== (end.numeric < 0))) return null;
     if ((row.target && !measuredTarget(row.target)) || (end.target && !measuredTarget(end.target))) return null;
     const from = orderedBarGeometry(start.plotWidth, row.numeric / start.scaleMax, row.target && row.target.numeric / start.scaleMax);
     const to = orderedBarGeometry(endPlotWidth, end.numeric / endLayout.scaleMax, end.target && end.target.numeric / endLayout.scaleMax);
-    playbackValues.set(row.key, { orderedGeometry: {
+    const firstSegments = row.segments;
+    const lastSegments = end.segments;
+    let segmentWidths: readonly number[] | undefined;
+    if (firstSegments?.length || lastSegments?.length) {
+      if (!firstSegments || !lastSegments || !compatibleSegments(firstSegments, lastSegments)) return null;
+      const startWidths = splitBarWidths(start.plotLeft, from.fill, firstSegments.map(segment => segment.share));
+      const endWidths = splitBarWidths(endPlotLeft, to.fill, lastSegments.map(segment => segment.share));
+      segmentWidths = startWidths.map((width, i) => interpolate(width, endWidths[i]!));
+      changed ||= startWidths.some((width, i) => width !== endWidths[i]);
+    }
+    playbackValues.set(row.key, { segmentWidths, orderedGeometry: {
       fill: interpolate(from.fill, to.fill),
       gapStart: interpolate(from.gapStart, to.gapStart),
       gapEnd: interpolate(from.gapEnd, to.gapEnd),

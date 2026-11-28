@@ -204,8 +204,10 @@ function makeRecordingCanvas(width = 960, height = 300) {
 
 const KIND = 'worker-motion-test';
 const TARGET_KIND = `${KIND}-target`;
+const SEGMENT_KIND = `${KIND}-segments`;
 const BLUE = '#4f86f7';
-type Sample = { value: number | null; key?: string; form?: BarsModel['form']; target?: number | true; zeroTarget?: boolean; segments?: boolean; scale?: number; whole?: boolean; art?: boolean; renames?: readonly number[]; france?: number; sectionAt?: number; showSectionCount?: boolean };
+const ORANGE = '#e97732';
+type Sample = { value: number | null; key?: string; form?: BarsModel['form']; target?: number | true; zeroTarget?: boolean; segments?: boolean; parts?: readonly (readonly [string, number])[]; segmentsIncomplete?: boolean; scale?: number; whole?: boolean; art?: boolean; renames?: readonly number[]; france?: number; sectionAt?: number; showSectionCount?: boolean };
 
 const testProjection = registerFamilyProjection({
   family: 'bars',
@@ -238,6 +240,8 @@ const testProjection = registerFamilyProjection({
         readout: { primary: String(numeric), secondary: `/ ${target ?? 0} a day`, ...(shortfall === null ? {} : { shortfall: `\u2212${shortfall}` }) },
       } : {}),
       ...(sample?.segments ? { segments: [{ key: 'part', label: 'Part', share: 1, color: BLUE, value }] } : {}),
+      ...(sample?.parts ? { segments: sample.parts.map(([key, share], i) => ({ key, label: key, share, color: i ? ORANGE : BLUE, value })) } : {}),
+      ...(sample?.segmentsIncomplete ? { segmentsIncomplete: true } : {}),
     }];
     if (sample?.france !== undefined) {
       const france = sample.france;
@@ -261,6 +265,7 @@ const testProjection = registerFamilyProjection({
 }, 'main');
 registerFamilyProjection({ ...testProjection, kind: `${KIND}-mixed`, singleValueBars: () => false }, 'main');
 registerFamilyProjection({ ...testProjection, kind: TARGET_KIND, singleValueBars: () => 'target-markers' }, 'main');
+registerFamilyProjection({ ...testProjection, kind: SEGMENT_KIND, singleValueBars: () => 'ordered-segments' }, 'main');
 
 type TestBitmap = Bitmapped & { close(): void };
 
@@ -350,12 +355,12 @@ function fixture(budget: number) {
   lane.setLaneSurface(canvas.canvas, true);
   lane.follow(1, 'panel', 'p');
   lane.bindRoute(1, 1, 9, 1, 0);
-  const bind = (measure = 1, id = 1, reducedMotion = false, mixed: boolean | 'target' = false, pin: number | null = null) => {
+  const bind = (measure = 1, id = 1, reducedMotion = false, mixed: boolean | 'target' | 'segments' = false, pin: number | null = null) => {
     lane.payloads({ type: 'payloads', put: [[1, { s: 1 }], [10 + measure, measure]] });
     lane.bind(id, {
       generation: measure, owner: 'track', surfaces: [{ width: 480, height: 240, dpr: 1 }], offset: 0, pin,
     }, {
-      family: 'bars', kind: mixed === 'target' ? TARGET_KIND : mixed ? `${KIND}-mixed` : KIND, view: 'main', options: measure, sources: { s: 1 }, scrollTop: 0,
+      family: 'bars', kind: mixed === 'target' ? TARGET_KIND : mixed === 'segments' ? SEGMENT_KIND : mixed ? `${KIND}-mixed` : KIND, view: 'main', options: measure, sources: { s: 1 }, scrollTop: 0,
       width: 480, height: 240, theme: TEST_THEME, audit: true, reducedMotion,
       revisions: { options: 10 + measure, sources: 1 },
     } satisfies FamilyBarsBinding);
@@ -1283,6 +1288,82 @@ describe('Ordered bar playback', () => {
     f.clock(100.5, 1);
     f.tick(0);
     assert.equal(f.barWidth(), 1);
+  }));
+
+  it('tweens ordered segment edges from the cold shapes and keeps the total recorded', async () => withLane(async f => {
+    f.bind(1, 1, false, 'segments');
+    const first = { value: 1, scale: 400, parts: [['Army', .75], ['Navy', .75]] } as const;
+    const next = { value: 52, scale: 1000, parts: [['Army', .25], ['Navy', .75]] } as const;
+    f.record(100, first);
+    f.record(101, next);
+    const edges = () => [BLUE, ORANGE].map(color => {
+      const op = f.operations().find(op => (op.op === 'roundRect' || op.op === 'fillRect') && op.fillStyle === color);
+      assert.ok(op, `expected segment ${color}`);
+      return Number(op.args[0]) + Number(op.args[2]);
+    });
+    const hasLabel = (value: number) => f.operations().some(op => op.op === 'fillText' && op.args[0] === String(value));
+    await f.request(100);
+    const start = edges();
+    f.canvas.clearOps();
+    await f.request(101);
+    const end = edges();
+    for (const fraction of [.25, .5, .99]) {
+      f.canvas.clearOps();
+      f.clock(100 + fraction, 1, 1, true);
+      f.tick(0);
+      for (const [i, edge] of edges().entries()) {
+        const expected = start[i]! + (end[i]! - start[i]!) * fraction;
+        assert.ok(Math.abs(edge - expected) < .02, `segment ${i} at ${fraction}, got ${edge}, expected ${expected}`);
+      }
+      assert.equal(f.served.at(-1)?.changed, 1);
+      assert.ok(hasLabel(first.value));
+    }
+    f.canvas.clearOps();
+    f.clock(101, 1);
+    f.tick(0);
+    assert.deepEqual(edges(), end);
+    assert.ok(hasLabel(next.value));
+    f.canvas.clearOps();
+    f.clock(100.5, 0);
+    await f.request(100);
+    assert.deepEqual(edges(), start);
+    assert.ok(hasLabel(first.value));
+  }));
+
+  it('cuts ordered segment motion at segment membership, order, sign and proof changes', async () => {
+    const sameParts = [['Army', .65], ['Navy', .35]] as const;
+    for (const [hour, next, segmentsIncomplete] of [
+      [101, { value: 80, parts: [['Army', 1]] }],
+      [101, { value: 80, parts: [['Army', .65], ['Air', .35]] }],
+      [101, { value: 80, parts: [['Navy', .35], ['Army', .65]] }],
+      [101, { value: -80, parts: sameParts }],
+      [101, { value: 80, parts: sameParts }, true],
+      [101, { value: null }],
+      [102, { value: 80, parts: sameParts }],
+    ] as const) await withLane(async f => {
+      f.bind(1, 1, false, 'segments');
+      f.record(100, { value: 40, parts: sameParts, segmentsIncomplete });
+      f.record(hour, next);
+      await f.request(100);
+      const before = f.barWidth();
+      f.clock(100.5, 1, 1, true);
+      f.tick(0);
+      assert.equal(f.served.at(-1)?.changed, 0);
+      assert.equal(f.barWidth(), before);
+    });
+  });
+
+  it('keeps existing plain bars moving when a different row crosses zero', async () => withLane(async f => {
+    f.record(100, { value: -10, france: 30 });
+    f.record(101, { value: 20, france: 50 });
+    await f.request(100);
+    const topWidth = () => f.operations().find(op => op.op === 'roundRect' && op.fillStyle === BLUE)?.args[2];
+    const previous = topWidth();
+    f.canvas.clearOps();
+    f.clock(100.5, 1, 1, true);
+    f.tick(0);
+    assert.equal(f.served.at(-1)?.changed, 1);
+    assert.ok(Number(topWidth()) > Number(previous));
   }));
 
   it('cuts target motion when a marker disappears or proof has a gap', async () => {

@@ -8,6 +8,7 @@ import { BARS_VIEWS } from '../../widgets/manifest/bars.ts';
 import { createBoundedReadView, displayedHour } from '../boundedView.ts';
 import { normalizeView } from '../manifest.ts';
 import type { FactionTotalsRaceOptions } from './factionTotalsRace.ts';
+import type { BarsPlaybackForm } from '../contract.ts';
 import { isSingleValueOrdered, type BarsProjection } from './model.ts';
 
 const hour = displayedHour(100);
@@ -48,7 +49,7 @@ function factionReply(value: number, options: FactionTotalsRaceOptions) {
   };
 }
 
-function check<O>(projection: BarsProjection<O>, options: O, expected: boolean | 'target-markers', panel: (value: number) => unknown, source = 'main') {
+function check<O>(projection: BarsProjection<O>, options: O, expected: BarsPlaybackForm | false, panel: (value: number) => unknown, source = 'main') {
   const context = `${projection.kind} ${JSON.stringify(options)}`;
   assert.equal(projection.singleValueBars?.(options), expected, context);
   if (!expected) return;
@@ -57,6 +58,7 @@ function check<O>(projection: BarsProjection<O>, options: O, expected: boolean |
     const model = projection.project(view, options);
     assert.ok(model.rows.some(row => row.kind === 'data'), context);
     assert.ok(isSingleValueOrdered(model, expected), context);
+    if (expected === 'ordered-segments' && amount > 0) assert.ok(model.rows.some(row => row.kind === 'data' && row.segments?.length), context);
   }
   for (const view of [
     createBoundedReadView({ hour }),
@@ -88,37 +90,60 @@ const cases: Record<string, (projection: BarsProjection<unknown>) => void> = {
     for (const split of booleans) for (const { value: mode } of COUNT_MODES) check(projection, {
       ...settings, mode, split, modeLabel: 'Factories', damagedSource: 'damaged7',
       parts: [{ id: 'p', label: 'Part', source: `${mode}1`, color: '#ff8800' }],
-    }, !split && mode !== 'built', amount => rank(amount, `${mode}7`, `${mode}1`, 'damaged7'));
+    }, split || mode === 'built' ? 'ordered-segments' : true, amount => rank(amount, `${mode}7`, `${mode}1`, 'damaged7'));
   },
   'game-score/race': projection => {
-    for (const split of booleans) for (const by of SCORE_PARTS) check(projection, { ...settings, by, split },
-      !split || by !== 'total', amount => rank(amount, by));
+    for (const split of booleans) for (const by of SCORE_PARTS) {
+      const segmented = split && by === 'total';
+      check(projection, { ...settings, by, split }, segmented ? 'ordered-segments' : true,
+        amount => segmented ? rank(amount, by, 'army', 'navy', 'air') : rank(amount, by));
+    }
   },
   'air-force-size/race': projection => {
     for (const split of booleans) for (const measure of ['planes', 'wings'] as const) for (const ownership of ['roster', 'effective'] as const) {
-      check(projection, { ...settings, measure, ownership, split }, !split, amount => rank(amount, 'measure'));
+      check(projection, { ...settings, measure, ownership, split }, split ? 'ordered-segments' : true,
+        amount => split ? forces(amount) : rank(amount, 'measure'));
     }
   },
   'army-size/race': projection => {
     for (const split of booleans) for (const { value: measure } of MEASURES) for (const countFor of ['owner', 'host'] as const) {
-      check(projection, { ...settings, measure, countFor, split }, !split || measure !== 'battalions', amount => rank(amount, 'measure'));
+      const segmented = split && measure === 'battalions';
+      check(projection, { ...settings, measure, countFor, split }, segmented ? 'ordered-segments' : true,
+        amount => segmented ? forces(amount) : rank(amount, 'measure'));
     }
   },
   'navy-size/race': projection => {
     for (const split of booleans) for (const measure of ['ships', 'strength'] as const) for (const ownership of ['roster', 'logical'] as const) for (const grouping of ['class', 'type'] as const) {
-      check(projection, { ...settings, measure, ownership, grouping, split }, !split, amount => measure === 'ships' ? rank(amount, 'measure') : forces(amount));
+      check(projection, { ...settings, measure, ownership, grouping, split }, split ? 'ordered-segments' : true,
+        amount => !split && measure === 'ships' ? rank(amount, 'measure') : forces(amount));
     }
   },
   'naval-losses/race': projection => {
     for (const split of booleans) for (const kind of ['ships', 'convoys', 'both'] as const) for (const attribution of ['lost', 'sunkBy'] as const) for (const period of ['month', 'running'] as const) {
-      check(projection, { ...settings, kind, attribution, period, split }, !split, forces);
+      check(projection, { ...settings, kind, attribution, period, split }, split ? 'ordered-segments' : true, forces);
     }
   },
   'nuclear-arsenal/race': projection => {
-    for (const split of booleans) check(projection, { ...settings, split }, !split, amount => ({
+    for (const split of booleans) check(projection, { ...settings, split }, split ? 'ordered-segments' : true, amount => ({
       types: [{ ordinal: 0, token: 'type', name: 'Type' }], missing: null, warnings: [],
       countries: [{ tag: 'GER', countryId: 1, slot: null, total: amount, counts: [{ ordinal: 0, value: amount, ready: 0 }] }],
     }));
+  },
+  'occupation-reserve-manpower/main': projection => {
+    for (const group of booleans) check(projection, { ...settings, group }, 'ordered-segments', amount => ({
+      holders: [{ country: { id: 1, tag: 'GER' }, slot: null, admitted: true, total: amount,
+        entries: [{ ordinal: 0, source: { id: 2, tag: 'FRA' }, amount }] }],
+      readHour: hour, unnamed: 0, noneMissing: null, missing: null, warnings: [],
+    }));
+  },
+  'raid-tally/race': projection => {
+    for (const metric of ['both', 'launched', 'succeeded'] as const) for (const group of booleans) {
+      check(projection, { ...settings, all: false, metric, group }, metric === 'both' ? 'ordered-segments' : false, amount => ({
+        branchId: '1', hour, firstHour: hour, lastHour: hour, metric, available: true, unavailable: null,
+        rows: [{ country: 1, tag: 'GER', launched: amount, succeeded: amount / 2, missing: null }],
+        unattributed: 0, unattributedLaunched: 0, unattributedSucceeded: 0, missing: null, warnings: [],
+      }));
+    }
   },
   'casualties/race': projection => {
     for (const view of ['race', 'butterfly'] as const) for (const includeUnknown of booleans) for (const group of booleans) {
@@ -168,7 +193,7 @@ const cases: Record<string, (projection: BarsProjection<unknown>) => void> = {
   'world-tension/race': projection => { check(projection, settings, true, amount => rank(amount, 'contribution')); },
 };
 
-test('every bars projection declaring single-value playback has fixtures for the options it accepts', async t => {
+test('every bars projection declaring ordered playback has fixtures for the options it accepts', async t => {
   const entries = await Promise.all(BARS_VIEWS.map(entry => entry.loadSpec()));
   const declaring = entries.filter(entry => entry.projection.singleValueBars);
   assert.deepEqual(declaring.map(entry => `${entry.kind}/${normalizeView(entry.view)}`).sort(), Object.keys(cases).sort());

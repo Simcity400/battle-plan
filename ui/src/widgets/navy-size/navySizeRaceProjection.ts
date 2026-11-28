@@ -29,7 +29,7 @@ const navyGrouping = (value: unknown): NavyGroupingOption => (value === 'type' ?
 export const navySizeRaceProjection: BarsProjection<NavySizeRaceOptions> = registerFamilyProjection({
   kind: 'navy-size',
   family: 'bars',
-  singleValueBars: options => !options.split,
+  singleValueBars: options => options.split ? 'ordered-segments' : true,
   nextChange: () => Infinity,
   project(readView: BoundedReadView, options: NavySizeRaceOptions): BarsModel {
     const strength = options.measure === 'strength';

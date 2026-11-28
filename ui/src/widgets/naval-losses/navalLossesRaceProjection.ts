@@ -17,7 +17,7 @@ export interface NavalLossesRaceOptions extends ForceAtRaceBaseOptions {
 export const navalLossesRaceProjection: BarsProjection<NavalLossesRaceOptions> = registerFamilyProjection({
   kind: 'naval-losses',
   family: 'bars',
-  singleValueBars: options => !options.split,
+  singleValueBars: options => options.split ? 'ordered-segments' : true,
   nextChange: () => Infinity,
   project(readView: BoundedReadView, options: NavalLossesRaceOptions): BarsModel {
     const scaleUnit = options.kind === 'ships' ? 'Ships' : options.kind === 'convoys' ? 'Convoys' : 'Ships & convoys';

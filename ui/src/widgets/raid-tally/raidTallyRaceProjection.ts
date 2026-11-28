@@ -102,6 +102,7 @@ function buildExactParams(base: Readonly<Record<string, unknown>>, hour: GatedHo
 export const raidTallyRaceProjection: BarsProjection<RaidTallyRaceOptions> = registerFamilyProjection({
   kind: 'raid-tally',
   family: 'bars',
+  singleValueBars: options => options.metric === 'both' ? 'ordered-segments' : false,
   project(readView: BoundedReadView, options: RaidTallyRaceOptions): BarsModel {
     const hour = readView.hour;
     const ranked = options.top != null || options.all;

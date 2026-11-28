@@ -8,7 +8,7 @@ import type { DeclaredProjectionExtra } from '../host/DeclaredFamilyWidget.tsx';
 import type { TooltipListItem } from '../host/tooltips.ts';
 import { knownValue, notRecorded, valueFromRawBigInt, zeroValue, type Value } from '../value.ts';
 import { formatValueState, type ValueFormat } from '../valueFormat.ts';
-import { barsLabelText, countryRowPresentation, type BarsDataRow, type CountryRowPresentation, type BarsModel, type BarsSegment } from './model.ts';
+import { barsLabelText, countryRowPresentation, type BarsDataRow, type CountryRowPresentation, type BarsModel } from './model.ts';
 
 export interface SeriesRaceBaseOptions {
   readonly top: number | null;
@@ -23,8 +23,7 @@ export interface SeriesRaceConfig {
   readonly measures?: readonly string[];
 }
 
-export interface SeriesRaceParts {
-  readonly segments?: readonly BarsSegment[];
+export interface SeriesRaceParts extends Pick<BarsDataRow, 'segments' | 'segmentsIncomplete'> {
   readonly items: readonly TooltipListItem[];
 }
 
@@ -114,6 +113,7 @@ function makeRow(readView: BoundedReadView, reply: SeriesRankReply, rankRow: Ser
     value: { value, format: config.valueFormat, label: config.valueLabel },
     numeric,
     ...(parts?.segments ? { segments: parts.segments } : {}),
+    ...(parts?.segmentsIncomplete ? { segmentsIncomplete: true } : {}),
     tooltip: {
       title: barsLabelText(pres.label),
       hour: readView.hour,

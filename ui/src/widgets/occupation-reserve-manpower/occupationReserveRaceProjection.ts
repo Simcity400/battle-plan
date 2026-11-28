@@ -116,6 +116,7 @@ function makeHolderRow(readView: BoundedReadView, holder: ReserveHolder, readHou
 export const occupationReserveRaceProjection: BarsProjection<OccupationReserveRaceOptions> = registerFamilyProjection({
   kind: 'occupation-reserve-manpower',
   family: 'bars',
+  singleValueBars: () => 'ordered-segments',
   nextChange: () => Infinity,
   project(readView: BoundedReadView, options: OccupationReserveRaceOptions): BarsModel {
     const hour = readView.hour;

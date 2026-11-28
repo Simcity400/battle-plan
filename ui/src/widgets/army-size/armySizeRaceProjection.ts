@@ -34,7 +34,7 @@ function seriesMeasure(measure: ArmyMeasure, countFor: ArmyAttribution): string 
 export const armySizeRaceProjection: BarsProjection<ArmySizeRaceOptions> = registerFamilyProjection({
   kind: 'army-size',
   family: 'bars',
-  singleValueBars: options => !options.split || options.measure !== 'battalions',
+  singleValueBars: options => options.split && options.measure === 'battalions' ? 'ordered-segments' : true,
   nextChange: () => Infinity,
   project(readView: BoundedReadView, options: ArmySizeRaceOptions): BarsModel {
     const isStrength = options.measure === 'strength';

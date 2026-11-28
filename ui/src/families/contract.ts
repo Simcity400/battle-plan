@@ -77,7 +77,7 @@ export interface FamilyTheme {
   hatchSpacing: number;
 }
 
-export type BarsPlaybackForm = true | 'target-markers';
+export type BarsPlaybackForm = true | 'target-markers' | 'ordered-segments';
 
 export interface FamilyProjection<TModel, TOptions> {
   readonly kind: string;
