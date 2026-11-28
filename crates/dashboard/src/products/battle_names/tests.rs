@@ -154,7 +154,7 @@ fn a_gap_keeps_the_sequence_and_each_lineage_counts_its_own_battles() {
 
 #[test]
 fn named_battle_rows_match_the_brokers_at_the_recorded_hours() {
-    use dashboard_base::test_fixtures::{source, source_with_content, visual_mods};
+    use dashboard_base::{presentation::Presentation, source::Work, test_fixtures::{source, source_with_content, visual_mods}};
     use dashboard_land::registrations::LAND_BATTLES_TAIL;
     use dashboard_world::products::place_name_runs::{PlaceNameRuns, PlaceNameRunsParams};
     use replay_data::rows::{LandCombatRow, ProvinceRow, StateRow, TableId, TableRows};
@@ -178,6 +178,10 @@ fn named_battle_rows_match_the_brokers_at_the_recorded_hours() {
     }).collect();
     let (source, load) = source_with_content(frames, &game.root);
     let source = Arc::new(source);
+    let content = load.content.as_ref().unwrap();
+    source.bind(Some((&content.options, content.allow_unverified)), Presentation::default());
+    source.content(&content.options).unwrap();
+    let load = dashboard_base::products::LoadContext { content: source.admit(Work::Content(Arc::new(AtomicBool::new(false)))) };
     let cancel = AtomicBool::new(false);
     let binding = load.content.as_ref().unwrap().presentation.binding();
     let build = Arc::<Build>::default();
