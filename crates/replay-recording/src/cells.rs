@@ -434,7 +434,21 @@ impl TableReader {
     }
 
     pub fn park_exact(&mut self) -> Option<usize> {
-        if self.log.is_some() || self.tracking || self.absent || self.withheld_before.is_some() {
+        if self.absent { return None; }
+        self.park_frame()
+    }
+
+    pub(crate) fn resume_frame(&mut self, recording: &Recording, ordinal: u32) -> io::Result<()> {
+        if self.entry.is_none() && !self.absent && self.ordinal.is_some() {
+            self.entry = Some(recording.table_entry(self.run, self.block, self.table)?);
+        }
+        self.go_to(recording, ordinal)
+    }
+
+    pub(crate) fn park_frame(&mut self) -> Option<usize> {
+        if self.log.is_some() || self.tracking || self.withheld_before.is_some()
+            || matches!(self.status, Status::Unavailable { .. })
+        {
             return None;
         }
         self.entry = None;

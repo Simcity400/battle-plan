@@ -80,6 +80,7 @@ pub struct HourCursor {
     replay: Arc<Replay>,
     tables: Vec<TableId>,
     changes: bool,
+    reader_budget: Option<usize>,
     last: Option<(BranchId, Hour, u32)>,
     frames: Option<Frames<Held>>,
 }
@@ -96,12 +97,21 @@ impl std::ops::Deref for Held {
 
 impl HourCursor {
     pub fn new(replay: Arc<Replay>, tables: &[TableId], changes: bool) -> Self {
-        Self { replay, tables: tables.to_vec(), changes, last: None, frames: None }
+        Self { replay, tables: tables.to_vec(), changes, reader_budget: None, last: None, frames: None }
+    }
+
+    pub fn bounded(replay: Arc<Replay>, tables: &[TableId], reader_budget: usize) -> Self {
+        let mut cursor = Self::new(replay, tables, false);
+        let fixed = size_of::<Self>() + cursor.tables.capacity() * size_of::<TableId>();
+        cursor.reader_budget = Some(reader_budget.saturating_sub(fixed));
+        cursor
     }
 
     pub fn replay(&self) -> &Arc<Replay> {
         &self.replay
     }
+
+    pub fn tables(&self) -> &[TableId] { &self.tables }
 
     pub fn last(&self) -> Option<(BranchId, Hour)> {
         self.last.map(|(branch, hour, _)| (branch, hour))
@@ -118,19 +128,34 @@ impl HourCursor {
 
     pub fn seek(&mut self, branch: BranchId, hour: Hour) -> io::Result<SeekResult> {
         let Some(block) = self.replay.block_at(branch, hour).copied() else {
+            if self.reader_budget.is_some() { self.release(); }
             return Ok(SeekResult::Gap { branch, hour, reason: self.replay.gap_reason(branch, hour)? });
         };
         let ordinal = self.replay.ordinal(&block, hour)?;
+        if self.reader_budget.is_some() && !self.last.is_some_and(|(prior_branch, prior_hour, _)| {
+            prior_branch == branch && prior_hour <= hour
+                && self.replay.block_at(prior_branch, prior_hour).is_some_and(|prior| prior.key() == block.key())
+        }) {
+            self.release();
+        }
         if self.frames.is_none() {
             let frames = Frames::new(Held(Arc::clone(&self.replay)), &self.tables)?;
             self.frames = Some(if self.changes { frames.with_change_facts() } else { frames });
         }
         let frames = self.frames.as_mut().expect("made");
-        let read = Pool::on(self.replay.pool.as_deref(), || frames.go_to(block.run, ordinal).and_then(|()| frames.frame(branch)));
-        match read {
-            Ok(frame) => {
-                self.last = Some((branch, hour, block.run));
-                Ok(SeekResult::Frame(engine_allocation::boxed(frame)?))
+        let budget = self.reader_budget;
+        let read = Pool::on(self.replay.pool.as_deref(), || {
+            if let Some(budget) = budget {
+                frames.frame_with_parked_readers(branch, block.run, ordinal, budget).map(|(frame, bytes)| (frame, bytes.is_some()))
+            } else {
+                frames.go_to(block.run, ordinal)?;
+                frames.frame(branch).map(|frame| (frame, true))
+            }
+        });
+        match read.and_then(|(frame, retained)| Ok((engine_allocation::boxed(frame)?, retained))) {
+            Ok((frame, retained)) => {
+                if retained { self.last = Some((branch, hour, block.run)); } else { self.release(); }
+                Ok(SeekResult::Frame(frame))
             }
             Err(error) => {
                 self.release();
@@ -290,6 +315,29 @@ mod tests {
 
     fn restores(cursor: &HourCursor) -> Vec<u32> {
         TABLES.iter().map(|&table| cursor.frames.as_ref().and_then(|frames| frames.reader(table)).map_or(0, TableReader::restores)).collect()
+    }
+
+    #[test]
+    fn bounded_readers_reuse_a_block_and_drop_on_seeks_or_budget_refusal() {
+        let replay = Arc::new(replay());
+        let first = FIRST.start;
+        let mut cursor = HourCursor::bounded(Arc::clone(&replay), &TABLES, 1024 * 1024);
+        for (hour, opens) in [(first, 2), (first + 1, 0), (first + 25, 0), (first, 2), (first + BLOCK, 2), (LATER, 2)] {
+            let (got, counts) = replay_recording::cells::count_reads(|| cursor.seek(1, hour));
+            let SeekResult::Frame(got) = got.unwrap() else { panic!("expected recorded hour {hour}") };
+            let SeekResult::Frame(exact) = replay.seek_selected(1, hour, Some(&TABLES)).unwrap() else { panic!("expected exact hour {hour}") };
+            assert_eq!(got.tables, exact.tables);
+            assert_eq!(got.metrics.table_ns, exact.metrics.table_ns);
+            for table in TABLES {
+                assert_eq!(got.tables[table.index()].sampled_at(), exact.tables[table.index()].sampled_at());
+            }
+            assert_eq!(counts.values().map(|read| read.opened).sum::<u64>(), opens, "hour {hour}");
+        }
+        assert!(matches!(cursor.seek(1, FIRST.end).unwrap(), SeekResult::Gap { .. }));
+        assert!(cursor.frames.is_none());
+        let mut tight = HourCursor::bounded(replay, &TABLES, 0);
+        assert!(matches!(tight.seek(1, first).unwrap(), SeekResult::Frame(_)));
+        assert!(tight.frames.is_none());
     }
 
     #[test]

@@ -264,6 +264,38 @@ impl<R: std::ops::Deref<Target = Recording>> Frames<R> {
         self.seek_with(run, ordinal, TableReader::go_to)
     }
 
+    pub fn frame_with_parked_readers(&mut self, branch: u64, run: u32, ordinal: u32, budget: usize) -> io::Result<(DecodedFrame, Option<usize>)> {
+        self.seek_with(run, ordinal, TableReader::resume_frame)?;
+        let frame = self.frame(branch)?;
+        Ok((frame, self.park_readers(budget)))
+    }
+
+    fn park_readers(&mut self, budget: usize) -> Option<usize> {
+        let fixed = self.slots.capacity() * size_of::<Slot>()
+            + self.clock.as_ref().map_or(0, |(_, hours)| hours.capacity() * size_of::<ClockHour>());
+        let mut remaining = budget.checked_sub(fixed)?;
+        let mut candidates = engine_allocation::vec(self.slots.len()).ok()?;
+        for (index, slot) in self.slots.iter_mut().enumerate() {
+            slot.view = None;
+            slot.update = None;
+            slot.lost = None;
+            if let Some(bytes) = slot.reader.as_mut().and_then(TableReader::park_frame) {
+                candidates.push((bytes, index));
+            } else {
+                slot.reader = None;
+            }
+        }
+        candidates.sort_unstable();
+        for (bytes, index) in candidates {
+            if let Some(left) = remaining.checked_sub(bytes) {
+                remaining = left;
+            } else {
+                self.slots[index].reader = None;
+            }
+        }
+        Some(budget - remaining)
+    }
+
     fn seek_with(&mut self, run: u32, ordinal: u32, move_reader: fn(&mut TableReader, &Recording, u32) -> io::Result<()>) -> io::Result<()> {
         let recording: &Recording = &self.recording;
         let held = recording.run(run)?;
