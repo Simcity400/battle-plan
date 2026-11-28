@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { countryKey } from '../../dashboard/countryKey.ts';
-import { assertBarsModelValid, type BarsDataRow } from '../../families/bars/model.ts';
+import { assertBarsModelValid, deriveBarsAudit, deriveBarsMirror, type BarsDataRow } from '../../families/bars/model.ts';
 import { createBoundedReadView, displayedHour, FutureDataError } from '../../families/boundedView.ts';
 import type { IdentityProvider } from '../../families/plan.ts';
 import { knownValue } from '../../families/value.ts';
@@ -46,7 +46,7 @@ const view = (panel: SeriesRankReply) => createBoundedReadView({
 const OPTIONS: GameScoreRaceOptions = { surface: '#1e1e1e', top: 10, all: false, group: false, by: 'total', split: true };
 
 test('game-score race keeps the product order, keys rows by recorded slot, and splits only a proven sum of parts', () => {
-  const shown = view(reply([['USA', 1, 4000, 1500, 1500, 1000], ['GER', 2, 3500, 2000, 500, null], ['ENG', 3, 2500, 500, 1500, 500]]));
+  const shown = view(reply([['USA', 1, 4000, 1500, 1500, 1000], ['GER', 2, 3500, 2000, 500, null], ['ENG', 3, 2500, 500, 2250.125, -250.125]]));
   const model = gameScoreRaceProjection.project(shown, OPTIONS);
   assertBarsModelValid(model, 500);
   const rows = model.rows.filter((row): row is BarsDataRow => row.kind === 'data');
@@ -59,6 +59,10 @@ test('game-score race keeps the product order, keys rows by recorded slot, and s
   assert.equal(rows[1]!.segments, undefined, 'a missing part leaves the bar whole: the known parts are never stretched to fill it');
   assert.equal(rows[1]!.segmentsIncomplete, true);
   assert.deepEqual(rows[1]!.tooltip?.items?.find(item => item.label === 'Air'), { label: 'Air', swatch: rows[0]!.segments![2]!.color, missingReason: 'Scores were not read at this hour' });
+  assert.deepEqual(rows[2]!.segments?.map(segment => segment.key), ['army', 'navy']);
+  assert.equal(rows[2]!.tooltip?.items?.find(item => item.label === 'Air')?.value, '\u2212250.125');
+  assert.match(deriveBarsMirror(model).rows[2]?.cells.find(cell => cell.column === 'segments')?.spoken ?? '', /Air \u2212250\.125/);
+  assert.equal(deriveBarsAudit(model).find(cell => cell.key === `${countryKey(3)}:part:air`)?.value, '["known",["int","-25012500"]]');
   assert.throws(() => shown.who('country', 'GER', displayedHour(501)), FutureDataError);
 });
 
@@ -68,6 +72,10 @@ test('a refused top says why, and chosen countries keep the product order with t
   const chosen = gameScoreRaceProjection.project(view(reply([['ENG', 3, 1200, null, null, null], ['GER', 2, null, null, null, null]], 'GER’s total was not recorded at this hour')), { ...OPTIONS, top: null, split: false });
   const rows = chosen.rows.filter((row): row is BarsDataRow => row.kind === 'data');
   assert.deepEqual(rows.map(row => [row.key, row.value?.value.kind]), [[countryKey(3), 'known'], [countryKey(2), 'notRecorded']]);
+  const split = gameScoreRaceProjection.project(view(reply([['ENG', 3, null, 300, null, -50]])), { ...OPTIONS, top: null });
+  assert.equal((split.rows[0] as BarsDataRow).segments, undefined);
+  assert.equal(deriveBarsAudit(split).find(cell => cell.key === `${countryKey(3)}:part:air`)?.value, '["known",["int","-5000000"]]');
+  assert.match(deriveBarsMirror(split).rows[0]?.cells.find(cell => cell.column === 'segments')?.spoken ?? '', /Navy Not recorded.*Air \u221250/i);
 });
 
 test('the race asks the one rank reply, with the split parts only when splitting the total, and sends a group whole', () => {
