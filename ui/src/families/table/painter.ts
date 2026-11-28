@@ -486,7 +486,7 @@ export function drawFamilyTable(
     return sig;
   };
 
-  const computeLook = (item: Extract<FlatTableRow, { kind: 'data' }>, column: FamilyColumnLayout) => {
+  const computeLook = (item: Extract<FlatTableRow, { kind: 'data' }>, column: FamilyColumnLayout, remember = true) => {
     const cell = item.row.cells[column.key];
     const paintModel = resolveCellPaintModel(cell, column, maxima);
     const formatted = formatValueState(paintModel.value, paintModel.format, cell?.missingFigure ? { figure: cell.missingFigure } : undefined);
@@ -494,6 +494,7 @@ export function drawFamilyTable(
     const pixels = barPixels(paintModel.bar.fraction, span);
     const fraction = paintModel.bar.fraction === null ? null : pixels / span;
     const fill = paintModel.bar.alert ? theme.red : colorOf(theme, paintModel.tone ?? undefined, paintModel.countryColor, fraction);
+    if (!remember) return { paintModel, formatted, fraction, fill, key: '' };
     const art = artStateOf(paintModel.art);
     const treeKey = `${item.isTreeGroup ? (item.isOpen ? 'o' : 'c') : ''}${treeTextStart(item.level, treeLevels)}`;
     const textVal = formatted.kind === 'notRecorded' || formatted.kind === 'notApplicable' || formatted.kind === 'pending' ? formatted.label : formatted.text;
@@ -619,7 +620,7 @@ export function drawFamilyTable(
     const limit = Math.min(layout.pinnedCount, layout.columns.length);
     for (let c = 0; c < limit; c++) {
       const col = layout.columns[c]!;
-      const look = computeLook(item, col);
+      const look = computeLook(item, col, false);
       drawApprovedCell(renderCtx, {
         item,
         column: col,
@@ -888,6 +889,7 @@ export function drawFamilyTable(
   };
 
   const paintPass = (pinnedOnly: boolean) => {
+    const retained = !pinnedOnly && frameKey !== null ? picture : undefined;
     const startCol = 0;
     const endCol = pinnedOnly ? Math.min(layout.pinnedCount, layout.columns.length) : layout.columns.length;
     for (let vi = 0; vi < visibleIndices.length; vi++) {
@@ -898,10 +900,10 @@ export function drawFamilyTable(
       if (item.kind !== 'data') {
         if (!pinnedOnly) {
           drawNonDataRow(item, y, rowH);
-          if (picture) {
-            picture.rowKeys[index] = item.key;
-            picture.rowRefs[index] = undefined;
-            picture.rowMarks[index] = nonDataMark(item);
+          if (retained) {
+            retained.rowKeys[index] = item.key;
+            retained.rowRefs[index] = undefined;
+            retained.rowMarks[index] = nonDataMark(item);
           }
         }
         continue;
@@ -909,7 +911,7 @@ export function drawFamilyTable(
       const inspected = inspectedKey === item.key;
       const selected = selectedKey === item.key;
       const focused = focusedKey === item.key;
-      const mark = rowMarkState(item, inspectedKey, selectedKey, focusedKey, isLastChildRow(rows, index));
+      const mark = retained ? rowMarkState(item, inspectedKey, selectedKey, focusedKey, isLastChildRow(rows, index)) : '';
       const contentH = item.isLiveEnd ? rowH - LIVE_END_GAP : rowH;
       const hl = hairlineSpec(item, index, pinnedOnly);
       const detailRow = rowGeom?.detailRows?.get(index);
@@ -921,12 +923,12 @@ export function drawFamilyTable(
       paintRowBackground(ctx, theme, rowWidth, y, rowH, contentH, item.level > 1, inspected, selected, focused, hl.kind, hl.left, logRows);
       if (rank > 0) {
         drawRankContent(item, pinnedOnly ? 0 : -bounds.left, y, contentH);
-        if (picture && !pinnedOnly) picture.ranks[index] = `${rankSignature(item)}\u0001${mark}`;
+        if (retained) retained.ranks[index] = `${rankSignature(item)}\u0001${mark}`;
       }
       let x = pinnedOnly ? rank : rank - bounds.left;
       for (let colIndex = startCol; colIndex < endCol; colIndex++) {
         const column = layout.columns[colIndex]!;
-        const look = computeLook(item, column);
+        const look = computeLook(item, column, retained !== undefined);
         drawApprovedCell(renderCtx, {
           item,
           column,
@@ -944,18 +946,18 @@ export function drawFamilyTable(
         });
         if (!pinnedOnly) {
           paintedCells++;
-          if (picture) {
-            let drawn = picture.cells.get(column.key);
-            if (!drawn) picture.cells.set(column.key, drawn = []);
+          if (retained) {
+            let drawn = retained.cells.get(column.key);
+            if (!drawn) retained.cells.set(column.key, drawn = []);
             drawn[index] = `${look.key}\u0001${mark}`;
           }
         }
         x += column.width;
       }
-      if (picture && !pinnedOnly) {
-        picture.rowKeys[index] = item.key;
-        picture.rowRefs[index] = item.row;
-        picture.rowMarks[index] = mark;
+      if (retained) {
+        retained.rowKeys[index] = item.key;
+        retained.rowRefs[index] = item.row;
+        retained.rowMarks[index] = mark;
       }
     }
   };
