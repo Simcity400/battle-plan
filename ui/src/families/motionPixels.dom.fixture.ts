@@ -189,8 +189,8 @@ async function checkSettledPixels(form: BarsPlaybackForm) {
           ...(form === 'share' ? {
             readout: { primary: `${value} units` },
             segments: [
-              { key: 'solid', label: 'Solid', share: value < 100 ? .3 : .6, color: theme.blue, value: knownValue(value) },
-              { key: 'dashed', label: 'Dashed', share: value < 100 ? .2 : .4, color: theme.red, hatched: true, value: knownValue(value) },
+              { key: 'solid', label: 'Solid', share: value < 100 ? .45 : .6, color: theme.blue, value: knownValue(value) },
+              { key: 'dashed', label: 'Dashed', share: value < 100 ? .35 : .4, color: theme.red, hatched: true, value: knownValue(value) },
             ],
           } : {}),
         }],

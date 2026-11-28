@@ -1370,7 +1370,7 @@ describe('Ordered bar playback', () => {
 
   it('interpolates share bounds through a change to a complete bar while keeping recorded labels', async () => withLane(async f => {
     f.bind(1, 1, false, 'share');
-    f.record(100, { form: 'share', value: 80, parts: [['Army', .3], ['Navy', .2]] });
+    f.record(100, { form: 'share', value: 80, parts: [['Army', .3], ['Navy', .4]] });
     f.record(101, { form: 'share', value: 100, parts: [['Army', .45], ['Navy', .55]] });
     const edges = () => {
       const ops = f.operations();
@@ -1434,6 +1434,17 @@ describe('Ordered bar playback', () => {
       assert.ok(f.operations().some(op => op.op === 'fillText' && op.args[0] === '80 units'), reason);
     });
   });
+
+  it('cuts share motion when a segment label changes its cold fit decision', async () => withLane(async f => {
+    f.bind(1, 1, false, 'share');
+    f.record(100, { form: 'share', value: 80, parts: [['Army', .2], ['Navy', .4]] });
+    f.record(101, { form: 'share', value: 100, parts: [['Army', .45], ['Navy', .55]] });
+    await f.request(100);
+    f.clock(100.5, 1, 1, true);
+    f.tick(0);
+    assert.equal(f.served.at(-1)?.changed, 0);
+    assert.ok(f.operations().some(op => op.op === 'fillText' && op.args[0] === 'Navy 40%'));
+  }));
 
   it('cuts target motion when a marker disappears or proof has a gap', async () => {
     for (const [hour, target] of [[101, undefined], [102, 180]] as const) await withLane(async f => {

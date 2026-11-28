@@ -812,14 +812,20 @@ export interface ShareBarSegment {
   readonly labelAlign?: 'left' | 'right';
 }
 
-interface ShareBarBounds {
+export interface ShareBarBounds {
   readonly x: number;
   readonly width: number;
+}
+
+export interface ShareBarLabelDecision {
+  readonly kind: 'full' | 'short' | 'none';
+  readonly align: 'left' | 'right';
 }
 
 export interface ShareBarGeometry {
   readonly segments: readonly ShareBarBounds[];
   readonly remainder: ShareBarBounds;
+  readonly labels?: readonly ShareBarLabelDecision[];
 }
 
 export function shareBarGeometry(x: number, width: number, shares: readonly number[]): ShareBarGeometry {
@@ -837,6 +843,22 @@ export function shareBarGeometry(x: number, width: number, shares: readonly numb
   });
   const remainderX = complete ? right : Math.min(right, cursor);
   return { segments, remainder: { x: remainderX, width: right - remainderX } };
+}
+
+export function shareBarLabelDecisions(
+  segments: readonly ShareBarSegment[],
+  bounds: readonly ShareBarBounds[],
+  measure: (text: string) => number,
+): readonly ShareBarLabelDecision[] {
+  return segments.map((segment, i) => {
+    const width = bounds[i]?.width ?? 0;
+    const align = segment.labelAlign === 'right' ? 'right' : 'left';
+    if (segment.hatched || !segment.label || width < 34) return { kind: 'none', align };
+    const room = width - 12;
+    if (measure(segment.label) <= room) return { kind: 'full', align };
+    if (segment.shortLabel && measure(segment.shortLabel) <= room) return { kind: 'short', align };
+    return { kind: 'none', align };
+  });
 }
 
 export function drawShareBar(
@@ -863,6 +885,7 @@ export function drawShareBar(
 
   const active = segments.filter(seg => seg.share > 0);
   const bounds = geometry ?? shareBarGeometry(x, width, active.map(seg => seg.share));
+  const labels = bounds.labels ?? shareBarLabelDecisions(active, bounds.segments, text => textWidth(ctx, text));
   for (let i = 0; i < active.length; i++) {
     const seg = active[i]!;
     const { x: cursor, width: segW } = bounds.segments[i]!;
@@ -873,15 +896,15 @@ export function drawShareBar(
       ctx.fillStyle = readableColour(seg.color, theme.surface);
       ctx.fillRect(cursor, y, segW, height);
     }
-    if (!seg.hatched && seg.label && segW >= 34) {
+    const label = labels[i]!;
+    if (label.kind !== 'none') {
       ctx.font = `600 11px ${theme.font}`;
       ctx.fillStyle = contrastInkForFill(readableColour(seg.color, theme.surface), theme);
-      const right = seg.labelAlign === 'right';
+      const right = label.align === 'right';
       ctx.textAlign = right ? 'right' : 'left';
       ctx.textBaseline = 'middle';
       const pad = 6;
-      const room = segW - pad * 2;
-      const shown = textWidth(ctx, seg.label) <= room ? seg.label : seg.shortLabel && textWidth(ctx, seg.shortLabel) <= room ? seg.shortLabel : null;
+      const shown = label.kind === 'full' ? seg.label : seg.shortLabel;
       if (shown) ctx.fillText(shown, right ? cursor + segW - pad : cursor + pad, y + height / 2);
     }
   }

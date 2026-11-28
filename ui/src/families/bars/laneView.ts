@@ -1,6 +1,6 @@
 import { LABEL_WEIGHT } from '../../charts/draw.ts';
 import { textWidth } from '../../charts/textWidth.ts';
-import { shareBarGeometry, splitBarWidths } from '../../draw/kit.ts';
+import { shareBarGeometry, shareBarLabelDecisions, splitBarWidths, type ShareBarLabelDecision } from '../../draw/kit.ts';
 import type { BarsPlaybackForm } from '../contract.ts';
 import type { LaneBinding, LaneFamily, LaneFrame } from '../laneRuntime.ts';
 import type { MotionSampleDiagnostic } from '../motion.ts';
@@ -12,6 +12,7 @@ import { hitPickList, pickAudit, pickedKey, pickNav, pickTooltip } from './pickL
 import { barsRegionRows } from './shareRows.ts';
 import { regionHitKey } from '../regions/regionRows.ts';
 import type { ValueFormat } from '../valueFormat.ts';
+import { formatShare } from '../valueFormat.ts';
 
 export interface FamilyBarsBinding<TOptions = unknown> extends LaneBinding<TOptions> {
   readonly family: 'bars';
@@ -345,6 +346,11 @@ function shareMotion(frame: BarsFrame, next: BarsModel, fraction: number, nextLa
     x: blend(from.x, to.x),
     width: blend(from.width, to.width),
   });
+  const measureCanvas = new OffscreenCanvas(1, 1).getContext('2d')!;
+  measureCanvas.font = `600 11px ${frame.theme.font}`;
+  const measure = (text: string) => textWidth(measureCanvas, text);
+  const sameLabels = (first: readonly ShareBarLabelDecision[], second: readonly ShareBarLabelDecision[]) => first.length === second.length
+    && first.every((label, i) => label.kind === second[i]!.kind && label.align === second[i]!.align);
   for (const [i, row] of current.rows.entries()) {
     if (row.kind !== 'data') continue;
     const end = endpoints[i]!;
@@ -357,9 +363,23 @@ function shareMotion(frame: BarsFrame, next: BarsModel, fraction: number, nextLa
     if (!first.length) continue;
     const from = shareBarGeometry(layout.plotLeft, layout.plotWidth, first.map(segment => segment.share));
     const to = shareBarGeometry(layout.plotLeft, layout.plotWidth, last.map(segment => segment.share));
+    const currentSegments = first.map(segment => ({
+      share: segment.share, color: segment.color, hatched: segment.hatched,
+      label: segment.inlineLabel ?? `${segment.label} ${formatShare(segment.share)}`,
+      shortLabel: formatShare(segment.share), labelAlign: undefined,
+    }));
+    const nextSegments = last.map(segment => ({
+      share: segment.share, color: segment.color, hatched: segment.hatched,
+      label: segment.inlineLabel ?? `${segment.label} ${formatShare(segment.share)}`,
+      shortLabel: formatShare(segment.share), labelAlign: undefined,
+    }));
+    const currentLabels = shareBarLabelDecisions(currentSegments, from.segments, measure);
+    const nextLabels = shareBarLabelDecisions(nextSegments, to.segments, measure);
+    if (!sameLabels(currentLabels, nextLabels)) return null;
     playbackValues.set(row.key, { shareGeometry: {
       segments: from.segments.map((bounds, i) => blendBounds(bounds, to.segments[i]!)),
       remainder: blendBounds(from.remainder, to.remainder),
+      labels: currentLabels,
     } });
   }
   return changed ? { ...frame, playbackValues } : false;
