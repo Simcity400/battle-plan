@@ -1,6 +1,6 @@
 
 use super::{Admits, Counters, PHASES, Sees, Source, TABLES, action};
-use viewer_layer_core::{layers::{Carried, Settling, Fed as Products, Inputs, Layer, Published, Upstream, View}, vision::{SightChange, SightCopy, SightKeys, Vision as VisionLayer}, playhead_host::mirror::{Mirror, Mirrors}};
+use viewer_layer_core::{layers::{Carried, Retirement, RetirementFlag, Settling, Fed as Products, Inputs, Layer, Published, Upstream, View}, vision::{SightChange, SightCopy, SightKeys, Vision as VisionLayer}, playhead_host::mirror::{Mirror, Mirrors}};
 use crate::relations::{self, Relations};
 use playhead::Step;
 use replay_data::{Hour, rows::TableId};
@@ -210,6 +210,7 @@ pub struct Tally {
 }
 
 pub struct Fed {
+    retiring: RetirementFlag,
     spec: Counters,
     jobs: Option<mpsc::Sender<Job>>,
     made: Option<viewer_runtime::landed::Receiver<Made>>,
@@ -241,6 +242,7 @@ pub struct Fed {
 impl Fed {
     pub fn new(counters: Counters) -> Self {
         Self {
+            retiring: RetirementFlag::default(),
             spec: counters,
             jobs: None,
             made: None,
@@ -361,7 +363,7 @@ impl Fed {
         }
     }
 
-    fn exchange(&mut self, wait: bool) {
+    fn exchange(&mut self, wait: bool) -> io::Result<()> {
         if let Some(receive) = &self.made {
             loop {
                 let made = if wait && self.owed > 0 {
@@ -369,7 +371,7 @@ impl Fed {
                     {
                         self.blocked += 1;
                     }
-                    receive.recv().map_err(|_| mpsc::TryRecvError::Disconnected)
+                    self.retiring.receive(receive)?.ok_or(mpsc::TryRecvError::Disconnected)
                 } else {
                     receive.try_recv()
                 };
@@ -401,10 +403,15 @@ impl Fed {
         if self.stopped {
             self.stacks = None;
         }
+        Ok(())
     }
 }
 
 impl Layer for Fed {
+    fn retirement(&self) -> Option<Retirement> {
+        Some(self.retiring.handle())
+    }
+
     fn held_viewer(&self) -> Option<u32> {
         self.perspective().map(|(_, vision)| vision.ours())
     }
@@ -461,8 +468,7 @@ impl Layer for Fed {
         self.waiting.clear();
         let relating = self.relating.clone();
         self.send(Job::Reset { epoch: self.epoch, model, mirrors: copies, sight, relating });
-        self.exchange(true);
-        Ok(())
+        self.exchange(true)
     }
 
     fn compose(&mut self, mirrors: &Mirrors) -> io::Result<()> {
@@ -487,7 +493,7 @@ impl Layer for Fed {
 
     fn settle_with(&mut self, _mirrors: &Mirrors, upstream: &Upstream<'_>, settling: Settling) -> io::Result<()> {
         let whole = settling.waits();
-        self.exchange(false);
+        self.exchange(false)?;
         let applied = self.products.applied_hour();
         let mut steps = Vec::new();
         while self.waiting.front().is_some_and(|step| applied.is_some_and(|applied| step.last() <= applied)) {
@@ -510,8 +516,7 @@ impl Layer for Fed {
         if !steps.is_empty() || sight.is_some() || relating.is_some() || viewing.is_some() || given.is_some() {
             self.send(Job::Frame { epoch: self.epoch, changes: Changes { stamp: applied, steps, sight, relating, viewing, given } });
         }
-        self.exchange(whole);
-        Ok(())
+        self.exchange(whole)
     }
 
     fn settle(&mut self, mirrors: &Mirrors, settling: Settling) -> io::Result<()> {

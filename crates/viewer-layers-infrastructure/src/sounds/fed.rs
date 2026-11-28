@@ -1,6 +1,6 @@
 
 use super::{Columns, Sounds, TABLES};
-use viewer_layer_core::{layers::{Carried, Settling, Fed as Products, Inputs, Layer, Published, Scope, Scoped, Sight, View}, playhead_host::mirror::{Mirror, Mirrors}};
+use viewer_layer_core::{layers::{Carried, Retirement, RetirementFlag, Settling, Fed as Products, Inputs, Layer, Published, Scope, Scoped, Sight, View}, playhead_host::mirror::{Mirror, Mirrors}};
 use playhead::Step;
 use replay_data::Hour;
 use std::{
@@ -99,6 +99,7 @@ fn run(jobs: mpsc::Receiver<Job>, made: landed::Sender<Made>) {
 }
 
 pub struct SoundsFed {
+    retiring: RetirementFlag,
     spec: Sounds,
     jobs: Option<mpsc::Sender<Job>>,
     made: Option<landed::Receiver<Made>>,
@@ -118,6 +119,7 @@ pub struct SoundsFed {
 impl SoundsFed {
     pub fn new(sounds: Sounds) -> Self {
         Self {
+            retiring: RetirementFlag::default(),
             spec: sounds,
             jobs: None,
             made: None,
@@ -164,10 +166,10 @@ impl SoundsFed {
         }
     }
 
-    fn exchange(&mut self, wait: bool) {
+    fn exchange(&mut self, wait: bool) -> io::Result<()> {
         if let Some(receive) = &self.made {
             loop {
-                let made = if wait && self.owed > 0 { receive.recv().map_err(|_| mpsc::TryRecvError::Disconnected) } else { receive.try_recv() };
+                let made = if wait && self.owed > 0 { self.retiring.receive(receive)?.ok_or(mpsc::TryRecvError::Disconnected) } else { receive.try_recv() };
                 let made = match made {
                     Ok(made) => made,
                     Err(mpsc::TryRecvError::Empty) => break,
@@ -193,10 +195,15 @@ impl SoundsFed {
         if self.stopped {
             self.battles = None;
         }
+        Ok(())
     }
 }
 
 impl Layer for SoundsFed {
+    fn retirement(&self) -> Option<Retirement> {
+        Some(self.retiring.handle())
+    }
+
     fn name(&self) -> &'static str {
         "sounds"
     }
@@ -234,8 +241,7 @@ impl Layer for SoundsFed {
         self.products.compose(mirrors.iter().find_map(Mirror::head));
         self.waiting.clear();
         self.send(Job::Reset { epoch: self.epoch, model, mirrors: copies });
-        self.exchange(true);
-        Ok(())
+        self.exchange(true)
     }
 
     fn apply(&mut self, step: &Step, _mirrors: &Mirrors) {
@@ -256,7 +262,7 @@ impl Layer for SoundsFed {
 
     fn settle(&mut self, _mirrors: &Mirrors, settling: Settling) -> io::Result<()> {
         let whole = settling.waits();
-        self.exchange(false);
+        self.exchange(false)?;
         let applied = self.products.applied_hour();
         let mut steps = Vec::new();
         while self.waiting.front().is_some_and(|step| applied.is_some_and(|applied| step.last() <= applied)) {
@@ -266,8 +272,7 @@ impl Layer for SoundsFed {
         if !steps.is_empty() || declared.is_some() {
             self.send(Job::Frame { epoch: self.epoch, stamp: applied, steps, declared });
         }
-        self.exchange(whole);
-        Ok(())
+        self.exchange(whole)
     }
 
 

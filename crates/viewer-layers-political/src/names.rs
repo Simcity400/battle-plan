@@ -1,5 +1,5 @@
 
-use viewer_layer_core::{layers::{Carried, Settling, Dirty, Due, Fed, Gpu, Inputs, Layer, Num, Published, Text, View}, owned::{Shape, Table, Tables}, rebuilt::{Build, Built, Seen, Whole}};
+use viewer_layer_core::{layers::{Carried, Settling, Dirty, Due, Fed, Gpu, Inputs, Layer, Num, Published, Retirement, RetirementFlag, Text, View}, owned::{Shape, Table, Tables}, rebuilt::{Build, Built, Seen, Whole}};
 use viewer_layer_core::playhead_host::{Entry, mirror::{Cell, Mirror, Mirrors}, views::Recording};
 use engine_executable::executable_tables::Tables as Executable;
 use replay_frame::frame::DecodedFrame;
@@ -877,6 +877,7 @@ fn run(content: Arc<dyn Atlas>, jobs: mpsc::Receiver<Job>, made: landed::Sender<
 }
 
 pub struct Names {
+    retiring: RetirementFlag,
     content: Arc<dyn Atlas>,
     columns: Option<Columns>,
     refused: Option<String>,
@@ -912,6 +913,7 @@ pub struct Names {
 impl Names {
     pub fn new(content: Arc<dyn Atlas>) -> Self {
         Self {
+            retiring: RetirementFlag::default(),
             kind: Kind::Countries,
             mode: MapMode::default(),
             restart: false,
@@ -1127,10 +1129,10 @@ impl Names {
         Ok(())
     }
 
-    fn exchange(&mut self, wait: bool) {
+    fn exchange(&mut self, wait: bool) -> io::Result<()> {
         if let Some(receive) = &self.made {
             loop {
-                let made = if wait && !self.fed.arrived() { receive.recv().ok() } else { receive.try_recv().ok() };
+                let made = if wait && !self.fed.arrived() { self.retiring.receive(receive)? } else { receive.try_recv().ok() };
                 let Some(made) = made else { break };
                 if made.epoch == self.epoch {
                     self.fed.receive(made.stamp, made);
@@ -1142,6 +1144,7 @@ impl Names {
         for made in due {
             self.take(made);
         }
+        Ok(())
     }
 
     fn take(&mut self, made: Landed<Made>) {
@@ -1225,8 +1228,15 @@ impl Names {
 }
 
 impl Layer for Names {
-    fn retirement(&self) -> Option<viewer_layer_core::layers::Retirement> {
-        self.modes.as_ref().and_then(Layer::retirement)
+    fn retirement(&self) -> Option<Retirement> {
+        let stop = self.retiring.handle();
+        let modes = self.modes.as_ref().and_then(Layer::retirement);
+        Some(Box::new(move || {
+            stop();
+            if let Some(modes) = modes {
+                modes();
+            }
+        }))
     }
 
     fn name(&self) -> &'static str {
@@ -1305,7 +1315,7 @@ impl Layer for Names {
                 self.kept.clear();
                 self.start(mirrors)?;
                 let marked = self.marked;
-                self.exchange(true);
+                self.exchange(true)?;
                 self.marked = marked;
                 Ok(())
             }
@@ -1376,7 +1386,7 @@ impl Layer for Names {
     fn settle(&mut self, mirrors: &Mirrors, settling: Settling) -> io::Result<()> {
         self.frame += 1;
         match self.kind {
-            Kind::Countries => self.exchange(settling.waits()),
+            Kind::Countries => self.exchange(settling.waits())?,
             Kind::Whole => {
                 if let Some(modes) = &mut self.modes {
                     modes.settle(mirrors, settling)?;
@@ -1390,7 +1400,7 @@ impl Layer for Names {
 
     fn upload(&mut self, gpu: &mut Gpu<'_>) -> io::Result<()> {
         if self.kind == Kind::Countries {
-            self.exchange(false);
+            self.exchange(false)?;
         }
         let pushed = self.push_any(&mut OnScene(gpu));
         if viewer_runtime::view_record::on() {

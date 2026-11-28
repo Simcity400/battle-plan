@@ -1,5 +1,5 @@
 
-use viewer_layer_core::layers::{Carried, Settling, Inputs, Layer, List, Num, Published, Text, Upstream, View};
+use viewer_layer_core::layers::{Carried, Settling, Inputs, Layer, List, Num, Published, Retirement, RetirementFlag, Text, Upstream, View};
 use viewer_layer_core::playhead_host::mirror::{Cell, Mirror, Mirrors, UNREAD_REASON};
 use playhead::{Step, changes::Changes};
 use replay_columnar::manifest::Status;
@@ -437,6 +437,7 @@ fn path_of(mirror: &Mirror, column: List, slot: u32) -> Vec<u32> {
 }
 
 pub struct Convoys {
+    retiring: RetirementFlag,
     routes: Arc<dyn Routes>,
     given: Mutex<Option<(Choice, Arc<Vision>)>>,
     fresh_vision: AtomicBool,
@@ -488,6 +489,7 @@ const NOT_DRAWN: &str = "no trade route is drawn in this map mode";
 impl Convoys {
     pub fn new(routes: Arc<dyn Routes>) -> Self {
         Self {
+            retiring: RetirementFlag::default(),
             routes,
             given: Mutex::new(None),
             fresh_vision: AtomicBool::new(false),
@@ -559,6 +561,7 @@ impl Convoys {
     fn release(&mut self) {
         let empty = Self::new(Arc::clone(&self.routes));
         let kept = std::mem::replace(self, empty);
+        self.retiring = kept.retiring;
         (self.given, self.fresh_vision, self.vision, self.window) = (kept.given, kept.fresh_vision, kept.vision, kept.window);
         (self.product_seq, self.frame, self.marked) = (kept.product_seq, kept.frame, kept.marked);
         self.hidden = true;
@@ -891,14 +894,14 @@ impl Convoys {
         }
     }
 
-    fn exchange(&mut self, wait: bool) {
+    fn exchange(&mut self, wait: bool) -> io::Result<()> {
         #[cfg(test)]
         if wait && self.in_flight > 0 {
             self.blocking_waits += 1;
         }
-        let Some((_, made)) = &self.worker else { return };
+        let Some((_, made)) = &self.worker else { return Ok(()) };
         while self.in_flight > 0 {
-            let next = if wait { made.recv().ok() } else { made.try_recv().ok() };
+            let next = if wait { self.retiring.receive(made)? } else { made.try_recv().ok() };
             let Some(made) = next else { break };
             self.in_flight = self.in_flight.saturating_sub(made.jobs);
             if self.vision.as_ref().is_none_or(|&(_, ours)| ours != made.ours) {
@@ -917,12 +920,13 @@ impl Convoys {
             self.worker_bytes = bytes;
         }
         self.stale |= self.moved && self.product.report.unavailable.is_some();
+        Ok(())
     }
 
-    fn settle_dirty(&mut self, mirrors: &Mirrors, wait: bool) {
+    fn settle_dirty(&mut self, mirrors: &Mirrors, wait: bool) -> io::Result<()> {
         self.frame += 1;
         if self.columns.is_none() {
-            return;
+            return Ok(());
         }
         if self.fresh_vision.swap(false, Ordering::AcqRel) {
             self.vision = self.given.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take().map(|(choice, vision)| (choice, vision.ours()));
@@ -933,10 +937,10 @@ impl Convoys {
             (self.pending, self.stale, self.since) = (Vec::new(), false, None);
             (self.worker, self.in_flight, self.worker_bytes) = (None, 0, 0);
             (self.product, self.landed, self.product_for, self.product_hour) = (Arc::default(), None, None, None);
-            return;
+            return Ok(());
         }
         if TABLES.iter().any(|&table| mirrors.get(table).is_none()) {
-            return;
+            return Ok(());
         }
         if self.refused.take().is_some() {
             self.read_all(mirrors);
@@ -968,13 +972,14 @@ impl Convoys {
             }
             self.stale |= changed;
         }
-        self.exchange(wait);
+        self.exchange(wait)?;
         if self.stale {
             self.stale = false;
             self.make(mirrors);
-            self.exchange(wait);
+            self.exchange(wait)?;
         }
         self.since = self.stale.then(|| self.since.unwrap_or(self.frame));
+        Ok(())
     }
 
     pub fn differ(&self, other: &Self) -> (u64, Option<String>) {
@@ -1005,6 +1010,10 @@ pub fn differ(ours: &TradeRoutes, theirs: &TradeRoutes, refused: Option<&str>, t
 }
 
 impl Layer for Convoys {
+    fn retirement(&self) -> Option<Retirement> {
+        Some(self.retiring.handle())
+    }
+
     fn name(&self) -> &'static str {
         "convoys"
     }
@@ -1068,7 +1077,7 @@ impl Layer for Convoys {
         }
         let marked = self.marked;
         self.refused = Some("composing".into());
-        self.settle_dirty(mirrors, true);
+        self.settle_dirty(mirrors, true)?;
         self.marked = marked;
         Ok(())
     }
@@ -1119,14 +1128,12 @@ impl Layer for Convoys {
     }
 
     fn settle(&mut self, mirrors: &Mirrors, settling: Settling) -> io::Result<()> {
-        self.settle_dirty(mirrors, settling.strict());
-        Ok(())
+        self.settle_dirty(mirrors, settling.strict())
     }
 
     fn settle_with(&mut self, mirrors: &Mirrors, upstream: &Upstream<'_>, settling: Settling) -> io::Result<()> {
         self.take_vision(upstream);
-        self.settle_dirty(mirrors, settling.strict());
-        Ok(())
+        self.settle_dirty(mirrors, settling.strict())
     }
 
 

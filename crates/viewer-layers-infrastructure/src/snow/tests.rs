@@ -160,7 +160,7 @@ fn snow_two_grids_taken_in_one_frame_upload_the_union_of_their_bands() {
     layer.fed.receive(Some(8), made_at(Some(8), &third, Some(&[late])));
     layer.fed.receive(Some(12), made_at(Some(12), &fourth, Some(&[early])));
     layer.fed.applied_through(8);
-    layer.exchange(false);
+    layer.exchange(false).unwrap();
     let rects = scene.rects.len();
     layer.push(&mut scene).unwrap();
     let mut written = scene.rects[rects..].to_vec();
@@ -226,7 +226,7 @@ fn snow_only_the_frames_upload_writes_what_the_worker_folded() {
 
     layer.fed.receive(Some(4), made_at(Some(4), &second, Some(&[cell])));
     layer.fed.applied_through(4);
-    layer.exchange(false);
+    layer.exchange(false).unwrap();
     assert_eq!(
         (scene.wholes, scene.rects.len(), scene.written, scene.finished),
         (wholes, rects, written, finished),

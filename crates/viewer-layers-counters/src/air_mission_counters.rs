@@ -3,7 +3,7 @@ use replay_derive::{
     air_region_derive::{Filter, Retained, last_pass},
 };
 
-use viewer_layer_core::{layers::{Carried, Settling, Dirty, Inputs, Layer, List, Num, Published, View}, owned::opaque};
+use viewer_layer_core::{layers::{Carried, Settling, Dirty, Inputs, Layer, List, Num, Published, Retirement, RetirementFlag, View}, owned::opaque};
 use viewer_layer_core::playhead_host::mirror::{Cell, Mirror, Mirrors};
 use playhead::{Step, changes::Changes};
 use replay_columnar::manifest::Status;
@@ -156,6 +156,7 @@ impl Asker {
 type Records = (Arc<Vec<AirCombatRecord>>, Arc<Vec<AirCombatRecord>>);
 
 pub struct AirMissionCounters {
+    retiring: RetirementFlag,
     content: Arc<Content>,
     columns: Option<Columns>,
     refused: Option<String>,
@@ -227,6 +228,7 @@ fn records_of(mirror: &Mirror, column: List, slot: u32) -> Option<Arc<Vec<AirCom
 impl AirMissionCounters {
     pub fn new(content: Arc<Content>) -> Self {
         Self {
+            retiring: RetirementFlag::default(),
             content,
             columns: None,
             refused: Some("not composed yet".into()),
@@ -424,6 +426,7 @@ impl AirMissionCounters {
     fn release(&mut self) {
         let empty = Self::new(Arc::clone(&self.content));
         let kept = std::mem::replace(self, empty);
+        self.retiring = kept.retiring;
         (self.columns, self.hidden, self.frame, self.marked, self.phases) = (kept.columns, kept.hidden, kept.frame, kept.marked, kept.phases);
         (self.vision, self.vision_new, self.passes, self.passes_new) = (kept.vision, kept.vision_new, kept.passes, kept.passes_new);
     }
@@ -588,18 +591,19 @@ impl AirMissionCounters {
         self.waiting.entry(question).or_default().insert(region);
     }
 
-    fn take_answers(&mut self, settling: &Settling) {
-        let Some(asker) = &self.asker else { return };
+    fn take_answers(&mut self, settling: Settling) -> io::Result<()> {
+        let Some(asker) = &self.asker else { return Ok(()) };
         let shared = Arc::clone(&asker.shared);
         let (answers, signal) = &*shared;
         let mut held = lock(answers);
         let until = Instant::now() + settling.waiting(WHOLE);
         while self.waiting.keys().any(|question| held.asked.contains(question)) {
+            self.retiring.check()?;
             let left = until.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 break;
             }
-            held = signal.wait_timeout(held, left).unwrap_or_else(|error| error.into_inner()).0;
+            held = signal.wait_timeout(held, left.min(RetirementFlag::POLL)).unwrap_or_else(|error| error.into_inner()).0;
         }
         let answered: Vec<(BranchId, Hour, u32)> = self.waiting.keys().filter(|question| held.given.contains_key(*question)).copied().collect();
         drop(held);
@@ -608,6 +612,7 @@ impl AirMissionCounters {
                 self.mark_region(region);
             }
         }
+        Ok(())
     }
 
     fn settle_region(&mut self, mirrors: &Mirrors, region: u32, ours: u32, hour: Hour) {
@@ -707,7 +712,7 @@ impl AirMissionCounters {
 }
 
 impl AirMissionCounters {
-    fn settle_dirty(&mut self, mirrors: &Mirrors, settling: Settling) {
+    fn settle_dirty(&mut self, mirrors: &Mirrors, settling: Settling) -> io::Result<()> {
         self.frame += 1;
         let core = if self.hidden { Err("not drawn at this view".to_owned()) } else { self.core(mirrors) };
         let ours = match core {
@@ -718,7 +723,7 @@ impl AirMissionCounters {
                     self.refused = Some(why);
                 }
                 self.all = false;
-                return;
+                return Ok(());
             }
         };
         let renew = self.vision_new.swap(false, Ordering::AcqRel);
@@ -768,7 +773,7 @@ impl AirMissionCounters {
             (self.hour, self.day) = (Some(hour), day);
             self.phases[3].1 += began.elapsed().as_nanos() as u64;
         }
-        self.take_answers(&settling);
+        self.take_answers(settling)?;
         let began = std::time::Instant::now();
         let mut dirty = std::mem::take(&mut self.regions);
         let taken = dirty.len() as u64;
@@ -780,21 +785,22 @@ impl AirMissionCounters {
         self.regions = dirty;
         self.phases[2].1 += began.elapsed().as_nanos() as u64;
         if !self.waiting.is_empty() {
-            self.settle_dirty_again(mirrors, ours, hour, settling);
+            self.settle_dirty_again(mirrors, ours, hour, settling)?;
         }
         if self.waiting.is_empty() && self.marks() == 0 {
             self.product_hour = Some(hour);
         }
+        Ok(())
     }
 
     fn marks(&self) -> usize {
         self.regions.len() + self.registrations_dirty.len() + self.combat_changed.len() + usize::from(self.all)
     }
 
-    fn settle_dirty_again(&mut self, mirrors: &Mirrors, ours: u32, hour: Hour, settling: Settling) {
+    fn settle_dirty_again(&mut self, mirrors: &Mirrors, ours: u32, hour: Hour, settling: Settling) -> io::Result<()> {
         while !self.waiting.is_empty() {
             let before = self.waiting.len();
-            self.take_answers(&settling);
+            self.take_answers(settling)?;
             if self.waiting.len() == before && settling.waiting(WHOLE).is_zero() {
                 break;
             }
@@ -809,6 +815,7 @@ impl AirMissionCounters {
             });
             self.regions = dirty;
         }
+        Ok(())
     }
 
     fn apply_table(&mut self, table: TableId, changes: &Changes, mirrors: &Mirrors, columns: Columns) {
@@ -904,6 +911,10 @@ impl AirMissionCounters {
 }
 
 impl Layer for AirMissionCounters {
+    fn retirement(&self) -> Option<Retirement> {
+        Some(self.retiring.handle())
+    }
+
     fn held_viewer(&self) -> Option<u32> {
         self.perspective().map(|(_, vision)| vision.ours())
     }
@@ -953,7 +964,7 @@ impl Layer for AirMissionCounters {
     fn compose(&mut self, mirrors: &Mirrors) -> io::Result<()> {
         let (marked, phases) = (self.marked, self.phases);
         self.all = true;
-        self.settle_dirty(mirrors, Settling::Whole);
+        self.settle_dirty(mirrors, Settling::Whole)?;
         self.publish();
         (self.marked, self.phases) = (marked, phases);
         Ok(())
@@ -974,7 +985,7 @@ impl Layer for AirMissionCounters {
     }
 
     fn settle(&mut self, mirrors: &Mirrors, settling: Settling) -> io::Result<()> {
-        self.settle_dirty(mirrors, settling);
+        self.settle_dirty(mirrors, settling)?;
         self.publish();
         Ok(())
     }

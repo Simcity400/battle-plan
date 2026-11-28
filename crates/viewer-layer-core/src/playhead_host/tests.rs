@@ -1646,7 +1646,7 @@ fn joined(side: &MapSide) -> &Joined {
 }
 
 #[test]
-fn a_step_joins_the_products_made_from_rows_at_the_head_and_stands_whole_at_its_hour() {
+fn live_steps_keep_the_last_product_and_a_stopped_step_joins_its_own_hour() {
     let made = |name: &str| {
         let (recording, _) = record(1, BLOCK, busy);
         let entry = open(units(recording, name), quick()).unwrap();
@@ -1688,6 +1688,17 @@ fn a_step_joins_the_products_made_from_rows_at_the_head_and_stands_whole_at_its_
     let last = one_by_one[2];
     assert_eq!((frame.drawn, frame.oldest), (last.0, last.1), "merged steps leave the picture the steps one by one leave");
     assert_eq!(sum_of(merged.parts().unwrap().0.get(table(0)).unwrap(), Num::of(table(0), 0)), last.2, "and the same mirror");
+
+    let (mut live, entry) = made("joined live");
+    let held = joined(&live).made.unwrap();
+    for _ in 0..=crate::layers::BOUND {
+        let head = live.applied().unwrap() + 4;
+        entry.playhead().wait_newest(head).unwrap();
+        let frame = live.frame_synced(head).unwrap();
+        assert_eq!((frame.applied, frame.oldest), (Some(head), Some(held)));
+    }
+    let head = live.applied().unwrap();
+    assert_eq!(live.frame_still(head).unwrap().oldest, Some(head));
 }
 
 #[test]

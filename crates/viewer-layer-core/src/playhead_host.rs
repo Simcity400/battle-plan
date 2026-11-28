@@ -1223,6 +1223,7 @@ impl<P: PlaybackProducts> MapSide<P> {
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn frame_waiting(&mut self, head: Hour) -> io::Result<Frame> {
+        self.views.settled();
         let was = self.consumer.set_blocking(true);
         let result = self.frame_step(head, crate::layers::Settling::step(), true, true);
         self.consumer.set_blocking(was);
@@ -1231,6 +1232,7 @@ impl<P: PlaybackProducts> MapSide<P> {
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn frame_synced(&mut self, head: Hour) -> io::Result<Frame> {
+        self.views.settled();
         let was = self.consumer.set_blocking(true);
         let result = self.frame_within(head, crate::layers::Settling::step(), true);
         self.consumer.set_blocking(was);
@@ -1261,9 +1263,9 @@ impl<P: PlaybackProducts> MapSide<P> {
         let doing = Arc::clone(&self.doing);
         let mut watch = Watch::new(&doing);
         timeline::step();
+        let mut frame = Frame { made: self.frame, head, waited: self.waited, layers: vec![LayerFrame::default(); self.names.len()], ..Frame::default() };
         self.views.settled();
         timeline::views_settled();
-        let mut frame = Frame { made: self.frame, head, waited: self.waited, layers: vec![LayerFrame::default(); self.names.len()], ..Frame::default() };
         watch.lap(&mut frame.stages, 0);
         let take_lap = replay_frame::cpu::scope("side.take", Some("other"));
         let playhead = &self.entry.playhead;
@@ -1416,7 +1418,6 @@ impl<P: PlaybackProducts> MapSide<P> {
                     continue;
                 }
                 let bound = self.layers[at].behind_bound();
-                let settling = settling.behind_bound(self.standing.behind(at), bound);
                 let (before, rest) = self.layers.split_at_mut(at);
                 let (layer, upstream) = (&mut rest[0], Upstream::new(before));
                 let part = &mut frame.layers[at];
@@ -1489,7 +1490,7 @@ impl<P: PlaybackProducts> MapSide<P> {
                         part.ready_at_hour = Some(layer.published() == crate::layers::Published::Current);
                     }
                     let published = layer.published();
-                    self.standing.settled(at, self.names[at], published, Instant::now(), bound)?;
+                    self.standing.settled(at, self.names[at], published, Instant::now(), bound, settling)?;
                 }
             }
             if let Some(hour) = applied_now.filter(|_| dated.contains(&true)) {
@@ -1507,7 +1508,6 @@ impl<P: PlaybackProducts> MapSide<P> {
                     continue;
                 }
                 let bound = self.layers[at].behind_bound();
-                let settling = settling.behind_bound(self.standing.behind(at), bound);
                 let (before, rest) = self.layers.split_at_mut(at);
                 let (layer, upstream) = (&mut rest[0], Upstream::new(before));
                 let part = &mut frame.layers[at];
@@ -1522,9 +1522,9 @@ impl<P: PlaybackProducts> MapSide<P> {
                     part.ready_at_hour = Some(layer.published() == crate::layers::Published::Current);
                 }
                 let published = layer.published();
-                self.standing.settled(at, self.names[at], published, Instant::now(), bound)?;
+                self.standing.settled(at, self.names[at], published, Instant::now(), bound, settling)?;
             }
-            if !self.stepped && self.standing.hours_stopped() {
+            if !self.stepped && settling.waits() && self.standing.hours_stopped() {
                 let drawn: Vec<(usize, &'static str)> = (0..self.layers.len()).filter(|&at| self.reads[at].is_ok() && self.ready[at] && !compose[at]).map(|at| (at, self.names[at])).collect();
                 self.standing.stopped_whole(&drawn)?;
             }
@@ -1596,7 +1596,7 @@ impl<P: PlaybackProducts> MapSide<P> {
         if let Some(overlay) = self.overlay.as_deref_mut() {
             overlay.stepped();
         }
-        self.combat.join(settling, viewer_runtime::simulation_rate::interval());
+        self.combat.join(settling);
         timeline::close(frame.composing);
         self.last = frame.clone();
         Ok(frame)
@@ -1825,7 +1825,7 @@ impl<P: PlaybackProducts> MapSide<P> {
                 return self.combat.open().then_some(Ok(()));
             }
             self.post_makers();
-            let joined = self.combat.join(Settling::Whole, std::time::Duration::ZERO);
+            let joined = self.combat.join(Settling::Whole);
             if joined.made {
                 return Some(Ok(()));
             }
@@ -2185,7 +2185,7 @@ impl<P: PlaybackProducts> MapSide<P> {
     }
 
     pub fn layer_retirements(&self) -> Vec<crate::layers::Retirement> {
-        self.layers.iter().filter_map(|layer| layer.retirement()).collect()
+        self.layers.iter().filter_map(|layer| layer.retirement()).chain(std::iter::once(self.combat.retirement())).collect()
     }
 
     #[cfg(any(test, feature = "test-support"))]
