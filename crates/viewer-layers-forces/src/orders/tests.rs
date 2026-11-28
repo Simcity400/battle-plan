@@ -42,26 +42,43 @@ fn campaign(at: u32, store: &mut Store) {
 }
 
 #[test]
-fn retiring_a_map_interrupts_an_orders_join_whose_rows_have_not_arrived() {
+fn retiring_a_map_interrupts_an_orders_join_whose_plan_has_not_arrived() {
     use std::sync::mpsc;
     use viewer_layer_core::layers::Settling;
 
-    let entry = open(recorded::record("retiring orders", 2, campaign), Settings::default()).unwrap();
-    let fed = Apart::new(&entry, 0).unwrap();
-    let mut layer = Orders::new(Arc::new(Links));
-    layer.set_views(fed.store()).unwrap();
+    let (_entry, mut fed, mut layer, plans) = gated("retiring orders", busy);
+    plans.set(false);
+    assert!(fed.drive(1));
     let retire = layer.retirement().unwrap();
     let (waiting, at_wait) = mpsc::channel();
     layer.shared.lock().on_wait = Some(Box::new(move || waiting.send(()).unwrap()));
 
     let outcome = std::thread::scope(|scope| {
-        let join = scope.spawn(move || layer.settle_at(1, Settling::Whole));
-        at_wait.recv().unwrap();
+        let join = scope.spawn(|| layer.settle_at(1, Settling::Whole));
+        let waited = at_wait.recv_timeout(LIMIT);
         retire();
-        join.join().unwrap()
+        let outcome = join.join().unwrap();
+        plans.set(true);
+        waited.expect("the join waits for a plan once the rows arrive");
+        outcome
     });
 
     assert_eq!(outcome.unwrap_err().kind(), io::ErrorKind::Interrupted);
+}
+
+#[test]
+fn retiring_after_an_orders_join_yields_wakes_the_map_and_interrupts_the_retry() {
+    use std::sync::mpsc;
+    use viewer_layer_core::layers::Settling;
+
+    let (_entry, fed, mut layer, _plans) = gated("retiring orders with rows owed", busy);
+    let (progress, woke) = mpsc::channel();
+    fed.store().handle().set_on_publish(Arc::new(move || { let _ = progress.send(()); }));
+    layer.settle_at(1, Settling::Whole).unwrap();
+    assert!(!layer.made_at(1), "the join yields until its rows arrive");
+    layer.retirement().unwrap()();
+    assert!(woke.try_recv().is_ok(), "retirement wakes a map waiting for publication");
+    assert_eq!(layer.settle_at(1, Settling::Whole).unwrap_err().kind(), io::ErrorKind::Interrupted);
 }
 
 #[test]
@@ -502,10 +519,22 @@ fn a_plan_of_rows_behind_the_hour_applied_says_their_hour_and_never_current() {
     let (_entry, mut fed, mut layer, _plans) = gated("orders cadence", campaign);
     stands_at(&mut fed, &mut layer, 0);
     layer.head = Some(3);
-    layer.take();
+    layer.settle_at(3, viewer_layer_core::layers::Settling::step()).unwrap();
     assert_eq!(layer.published(), Published::Cadence(0), "the map applied hour 3, the plan's rows stand at 0");
+    assert!(layer.plan().is_some());
+    assert!(!layer.made_at(3));
     stands_at(&mut fed, &mut layer, 3);
     assert_eq!(layer.published(), Published::Current, "its rows stand at the hour applied");
+}
+
+#[test]
+fn a_late_row_declaration_does_not_leave_the_old_plan_made_at_its_hour() {
+    let (_entry, mut fed, mut layer, _plans) = gated("orders late declaration", campaign);
+    stands_at(&mut fed, &mut layer, 0);
+    assert!(layer.made_at(0));
+    let reader = layer.rows.lock().unwrap().as_ref().cloned().expect("orders reader");
+    reader.declare_only(&[TableId::Clock]);
+    assert!(!layer.made_at(0), "clearing the reader frame invalidates the old plan");
 }
 
 #[test]

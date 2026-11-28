@@ -138,6 +138,10 @@ fn read_at<T>(at: &mut AtHead, head: Head<'_>, today: Option<&DecodedFrame>, mut
 }
 
 impl HeadRows {
+    pub(crate) fn open_clicks(&mut self, views: &Views) {
+        self.clicks.keep(views);
+    }
+
     pub(crate) fn units<T>(&mut self, head: Head<'_>, today: Option<&DecodedFrame>, read: impl FnMut(&DecodedFrame) -> T) -> Option<T> {
         read_at(&mut self.units, head, today, read)
     }
@@ -238,7 +242,7 @@ impl HeadRows {
 
     pub(crate) fn end_frame(&mut self, head: Head<'_>) {
         if let Some(views) = head {
-            self.clicks.keep(views);
+            self.open_clicks(views);
         }
         for at in [&mut self.units, &mut self.arrows, &mut self.air, &mut self.fleets, &mut self.walk, &mut self.map, &mut self.cursor, &mut self.order, &mut self.clicks, &mut self.find] {
             at.end_frame();

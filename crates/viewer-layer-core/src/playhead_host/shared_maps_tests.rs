@@ -20,13 +20,18 @@ use std::{sync::{Mutex, mpsc}, time::Duration};
 
 pub struct Reads {
     tables: Vec<TableId>,
+    extra: Option<(TableId, usize)>,
     composes: Arc<AtomicU32>,
 }
 
 impl Reads {
     pub fn new(tables: &[TableId]) -> (Box<dyn Layer>, Arc<AtomicU32>) {
+        Self::with_column(tables, None)
+    }
+
+    pub fn with_column(tables: &[TableId], extra: Option<(TableId, usize)>) -> (Box<dyn Layer>, Arc<AtomicU32>) {
         let composes = Arc::new(AtomicU32::new(0));
-        (Box::new(Self { tables: tables.to_vec(), composes: Arc::clone(&composes) }), composes)
+        (Box::new(Self { tables: tables.to_vec(), extra, composes: Arc::clone(&composes) }), composes)
     }
 }
 
@@ -39,6 +44,9 @@ impl Layer for Reads {
         for &table in &self.tables {
             inputs.table(table, true)?;
             inputs.index(table, 0)?;
+        }
+        if let Some((table, column)) = self.extra {
+            inputs.index(table, column)?;
         }
         Ok(())
     }

@@ -369,6 +369,7 @@ fn a_request_from_before_a_seek_back_never_steps_the_context_past_the_sought_hou
     entry.playhead().seek(6);
     entry.playhead().wait_newest(8).expect("the new seek's steps through hour 8 built");
     side.settle_all().unwrap();
+    assert_eq!(side.applied(), Some(12), "settling the old hour leaves the new seek for the next frame");
     frames_until(&mut side, 6, "the sought hour composed", |side| !side.composing() && layer(side).pending().last().is_some_and(|made| made.at().1 == 6));
     side.settle_all().unwrap();
     let made = layer(&side).pending().last().map(|made| (*made).clone()).unwrap();

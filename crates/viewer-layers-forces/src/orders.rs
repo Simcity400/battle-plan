@@ -105,6 +105,16 @@ struct Held {
     on_wait: Option<Box<dyn FnOnce() + Send>>,
 }
 
+impl Held {
+    fn continuing(&self) -> io::Result<()> {
+        if self.stop {
+            Err(io::Error::new(io::ErrorKind::Interrupted, "The map's orders layer is retiring"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
 struct Shared {
     held: Mutex<Held>,
     done: Condvar,
@@ -115,16 +125,12 @@ impl Shared {
         self.held.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn wait(&self, until: Instant) -> io::Result<()> {
-        let continuing = |held: &Held| {
-            if held.stop {
-                Err(io::Error::new(io::ErrorKind::Interrupted, "The map's orders layer is retiring"))
-            } else {
-                Ok(())
-            }
-        };
+    fn wait(&self, until: Instant, published: u64, reader: &views::Reader, hour: Hour, strict: bool) -> io::Result<()> {
         let held = self.lock();
-        continuing(&held)?;
+        held.continuing()?;
+        if held.published != published || held.stopped.as_ref().is_some() || !rows_cover(reader, hour, strict) {
+            return Ok(());
+        }
         #[cfg(test)]
         let held = {
             let mut held = held;
@@ -135,13 +141,21 @@ impl Shared {
         };
         let (held, _) = self.done.wait_timeout(held, until.saturating_duration_since(Instant::now()))
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        continuing(&held)
+        held.continuing()
     }
 
     fn stop(&self) {
         self.lock().stop = true;
         self.done.notify_all();
     }
+}
+
+fn rows_cover(reader: &views::Reader, hour: Hour, strict: bool) -> bool {
+    if strict {
+        return reader.has_rows_at(hour);
+    }
+    reader.newest().and_then(|(frame, _)| reader.through_seek(Arc::as_ptr(&frame)))
+        .is_some_and(|(through, seek)| through >= hour && seek == reader.seek())
 }
 
 fn plan_notes(own: Result<usize, String>) -> Vec<String> {
@@ -155,7 +169,7 @@ fn plan_notes(own: Result<usize, String>) -> Vec<String> {
     }
 }
 
-fn declare(reader: &views::Reader, declared: &mut Vec<TableId>, learned: &[TableId], show_allied: bool) {
+fn declare(shared: &Shared, reader: &views::Reader, declared: &mut Vec<TableId>, learned: &[TableId], show_allied: bool) {
     let mut tables = orders::memo_tables(show_allied);
     tables.extend(learned.iter().copied());
     tables.sort_unstable_by_key(|table| table.index());
@@ -163,6 +177,8 @@ fn declare(reader: &views::Reader, declared: &mut Vec<TableId>, learned: &[Table
     if tables != *declared {
         *declared = tables;
         reader.declare_only(declared);
+        let _held = shared.lock();
+        shared.done.notify_all();
     }
 }
 
@@ -188,7 +204,7 @@ fn work(shared: &Shared, plans: &dyn Plans, reader: &views::Reader, maker: timel
             reader.wait_newer(u64::MAX, LOOK);
             continue;
         };
-        declare(reader, &mut declared, &learned, asked.1);
+        declare(shared, reader, &mut declared, &learned, asked.1);
         let seen = handled.map_or(0, |(published, _)| published);
         let Some((newest, published)) = reader.newest() else {
             reader.wait_newer(seen, LOOK);
@@ -218,6 +234,7 @@ fn work(shared: &Shared, plans: &dyn Plans, reader: &views::Reader, maker: timel
                 held.published = stamp;
                 (made.stands, made.frame, made.stamp) = (stands, Some(Arc::clone(&newest)), stamp);
                 held.made.publish((generation, build_seq, made.stands), made);
+                reader.notify_progress();
             }
             drop(held);
             shared.done.notify_all();
@@ -273,6 +290,7 @@ fn work(shared: &Shared, plans: &dyn Plans, reader: &views::Reader, maker: timel
         );
         drop(held);
         shared.done.notify_all();
+        reader.notify_progress();
     }
 }
 
@@ -385,16 +403,15 @@ impl Orders {
     }
 
     fn settle_at(&mut self, hour: Hour, settling: Settling) -> io::Result<()> {
-        if self.rows.get_mut().unwrap_or_else(|poisoned| poisoned.into_inner()).is_none() {
-            return Err(io::Error::other("The orders layer has no rows at the head"));
-        }
+        let rows = self.rows.get_mut().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+            .ok_or_else(|| io::Error::other("The orders layer has no rows at the head"))?;
         let until = Instant::now() + settling.waiting(WHOLE);
         let strict = settling.strict();
         self.take_vision();
         let began = Instant::now();
         let mut waited = false;
         loop {
-            self.take();
+            let published = self.take();
             if self.refused.is_some() {
                 if strict {
                     return Err(io::Error::other(format!("{}: hour {hour} asked; {}", self.refused.as_deref().unwrap_or_default(), self.maker_state())));
@@ -415,21 +432,16 @@ impl Orders {
                 timeline::mark(self.maker, Mark::Joined);
                 return Ok(());
             }
-            let rows = self.rows.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !strict && !rows.as_deref().is_some_and(|reader| {
-                reader.newest().and_then(|(frame, _)| reader.through_seek(Arc::as_ptr(&frame)))
-                    .is_some_and(|(through, seek)| through >= hour && seek == reader.seek())
-            }) {
+            if !rows_cover(&rows, hour, strict) {
                 viewer_runtime::view_record::add("arrows", "joins_left_rows_pending", 1);
-                return Ok(());
+                return self.shared.lock().continuing();
             }
             if viewer_runtime::view_record::on() {
-                let rows = self.rows.get_mut().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
-                let held = rows.and_then(|rows| rows.newest()).is_some_and(|(frame, _)| frame.hour >= hour);
+                let held = rows.newest().is_some_and(|(frame, _)| frame.hour >= hour);
                 viewer_runtime::view_record::add("arrows", if held { "waits_for_the_build" } else { "waits_for_the_rows" }, 1);
             }
             waited = true;
-            self.shared.wait(if strict { until } else { until.min(now + LOOK) })?;
+            self.shared.wait(if strict { until } else { until.min(now + LOOK) }, published, &rows, hour, strict)?;
         }
     }
 
@@ -466,8 +478,8 @@ impl Orders {
         }
     }
 
-    fn take(&mut self) {
-        {
+    fn take(&mut self) -> u64 {
+        let published = {
             let held = self.shared.lock();
             self.marked = held.marked;
             if let Some(why) = held.stopped.as_ref() {
@@ -484,7 +496,8 @@ impl Orders {
                 }
                 self.made = held.made.landed_clone();
             }
-        }
+            held.published
+        };
         let reader = self.rows.get_mut().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
         if let Some(made) = self.made.take() {
             let made = if let Some(frame) = &made.frame {
@@ -501,6 +514,7 @@ impl Orders {
             };
             self.made = Some(made);
         }
+        published
     }
 
     fn shown_landed(&self) -> Option<&viewer_runtime::landed::Landed<Made>> {
@@ -537,7 +551,13 @@ impl Drop for Orders {
 impl Layer for Orders {
     fn retirement(&self) -> Option<Retirement> {
         let shared = Arc::clone(&self.shared);
-        Some(Box::new(move || shared.stop()))
+        let rows = self.rows.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().map(Arc::downgrade);
+        Some(Box::new(move || {
+            shared.stop();
+            if let Some(reader) = rows.and_then(|reader| reader.upgrade()) {
+                reader.notify_progress();
+            }
+        }))
     }
 
     fn name(&self) -> &'static str {
@@ -624,6 +644,12 @@ impl Layer for Orders {
             Some(head) if stands < head => Published::Cadence(stands),
             _ => Published::Current,
         }
+    }
+
+    fn made_at(&self, hour: Hour) -> bool {
+        self.perspective().is_none()
+            || (self.made_for() == Some(hour)
+                && self.rows.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().is_some_and(|reader| reader.has_rows_at(hour)))
     }
 
     fn held(&self) -> usize {

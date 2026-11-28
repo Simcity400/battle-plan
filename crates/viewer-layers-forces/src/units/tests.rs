@@ -853,9 +853,11 @@ fn a_view_above_the_land_cutoff_and_below_the_ships_draws_the_ships_and_no_land_
     units.window.as_mut().expect("in the window").tables = vec![TableId::Divisions];
     let layers: Vec<Box<dyn Layer>> = vec![Box::new(Sight::new(content)), Box::new(units)];
     let mut side = playing(&entry, layers, over(10, 600.0));
-    frames_at(&mut side, Some(8), 1, "the models made at a view that draws ships and no land figure", |side| side.parts().is_some() && !side.composing() && reading(side).prepared().is_some());
+    frames_at(&mut side, Some(8), 1, "the models made at a view that draws ships and no land figure", |side| {
+        side.parts().is_some() && !side.composing() && reading(side).models.as_ref().is_some_and(|models| models.made_at(8))
+    });
     assert_eq!(reading(&side).stack_count(), 0, "it holds no land figure");
-    assert!(!reading(&side).uploaded(), "the field the ships are drawn with is to be uploaded");
+    assert!(reading(&side).prepared().is_some(), "the models for the ships-only view were made");
 }
 
 #[derive(Default)]

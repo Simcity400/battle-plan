@@ -102,7 +102,7 @@ pub fn record_with(settings: Writing, tables: usize, hours: u32, mut hour: impl 
 
 pub struct Sum {
     pub(crate) column: Option<Num<i32>>,
-    pub(crate) second: bool,
+    pub second: bool,
     pub(crate) refuse_high: bool,
     pub hide_high: bool,
     pub(crate) read: Vec<Option<i32>>,
@@ -196,10 +196,13 @@ impl Layer for Sum {
             gate.lock().unwrap().recv().unwrap();
         }
         *self.composes.lock().unwrap() += 1;
-        let column = self.column.unwrap();
+        self.dirty.clear();
+        let Some(column) = self.column else {
+            self.values.clear();
+            return Ok(());
+        };
         let mirror = mirrors.get(column.table).unwrap();
         self.values = (0..mirror.slots() as u32).map(|slot| if mirror.live(slot) { mirror.number(column, slot).value().map(i64::from) } else { None }).collect();
-        self.dirty.clear();
         Ok(())
     }
 

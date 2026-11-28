@@ -10,7 +10,7 @@ use replay_columnar::{
     unit::{BLOCK, reader},
 };
 use replay_data::{Hour, rows::TableId};
-use std::{io, time::Duration};
+use std::{io, sync::Arc, time::Duration};
 use viewer_foundation::tables::Seen;
 
 pub const REPORT_WAIT: Duration = Duration::from_secs(60);
@@ -31,13 +31,13 @@ pub fn lines(entry: &Entry, hour: Option<Hour>, mirrors: Option<&Mirrors>) -> Ve
             lines.push(format!("{table:?}: unavailable ({reason})"));
             continue;
         }
-        let held = mirrors.and_then(|mirrors| mirrors.get(table));
+        let held = mirrors.and_then(|mirrors| mirrors.get(table)).filter(|mirror| mirror.head() == Some(hour));
         lines.push(match status(entry, table, hour) {
             Err(error) => format!("{table:?}: its status cannot be read at the head ({error})"),
             Ok(None) => format!("{table:?}: not recorded here: a gap in the recording"),
-            Ok(Some((Status::Complete, _))) => match held {
-                Some(mirror) => format!("{table:?}: {} rows", mirror.rows().count()),
-                None => format!("{table:?}: recorded; its rows are not held at the head"),
+            Ok(Some((Status::Complete, (run, _)))) => match held.map_or_else(|| row_count(entry, table, run, hour), |mirror| Ok(mirror.rows().count())) {
+                Ok(rows) => format!("{table:?}: {rows} rows"),
+                Err(error) => format!("{table:?}: recorded; its rows cannot be counted at the head ({error})"),
             },
             Ok(Some((Status::Truncated { missing }, _))) => format!("{table:?}: truncated, {missing} missing"),
             Ok(Some((Status::Unavailable { reason }, place))) => format!("{table:?}: unavailable ({})", reasons::words(entry, table, reason, place, REPORT_WAIT)),
@@ -49,6 +49,15 @@ pub fn lines(entry: &Entry, hour: Option<Hour>, mirrors: Option<&Mirrors>) -> Ve
     }
     lines.push("Capture time: not recorded in the playhead's units".to_owned());
     lines
+}
+
+fn row_count(entry: &Entry, table: TableId, run: usize, hour: Hour) -> io::Result<usize> {
+    let mut lane = playhead::lane::Lane::new(Arc::clone(entry.pages()), run, table.index(), &[], false)?;
+    lane.seek(hour)?;
+    Ok(match lane.log() {
+        Some(log) => log.live().ones().count(),
+        None => lane.cells().rows().count(),
+    })
 }
 
 pub fn differ(side: &MapSide<impl crate::playhead_host::PlaybackProducts>, today: &replay_frame::frame::DecodedFrame) -> (u64, u64, Option<String>, Vec<TableId>) {

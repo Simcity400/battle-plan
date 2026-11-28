@@ -50,6 +50,7 @@ struct Key<K> {
     generation: u64,
     branch: BranchId,
     hour: Hour,
+    epoch: u64,
     covered: bool,
     read: K,
 }
@@ -104,7 +105,7 @@ impl<A: Asking> Combat<A> {
         self.asked = None;
         let (Some(asking), Some(hour), Some(branch)) = (self.asking.clone(), applied, branch) else { return false };
         let covered = engaged.as_deref().is_some_and(|index| index.covers(branch, hour));
-        let key = Key { generation: self.generation, branch, hour, covered, read: asking.key() };
+        let key = Key { generation: self.generation, branch, hour, epoch, covered, read: asking.key() };
         if self.handed.as_ref() == Some(&key) {
             return false;
         }
@@ -133,6 +134,9 @@ impl<A: Asking> Combat<A> {
 
     pub fn join(&mut self, settling: Settling, interval: Duration) -> Joined {
         let (Some(key), Some(maker)) = (self.asked.take(), self.maker.as_mut()) else { return Joined { answered: true, made: false } };
+        if maker.rows.newest_seek().is_none_or(|(frame, _, epoch)| epoch != key.epoch || frame.hour < key.hour) {
+            return Joined { answered: false, made: false };
+        }
         let limit = if settling.waits() {
             WHOLE
         } else if Duration::from_nanos(maker.took.load(Ordering::Acquire)) <= interval {

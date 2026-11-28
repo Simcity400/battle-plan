@@ -112,6 +112,11 @@ impl CounterOwners {
         filter: &dashboard_core::protocol::CounterFilter,
     ) -> Option<Arc<BTreeSet<u32>>> {
         use viewer_layer_core::playhead_host::views::{AtHead, Pace};
+        if matches!(filter, dashboard_core::protocol::CounterFilter::All) {
+            self.head = None;
+            self.resolved = None;
+            return None;
+        }
         let Some(views) = head else {
             self.head = None;
             return today.and_then(|frame| self.read(frame, filter));

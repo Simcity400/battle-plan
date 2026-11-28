@@ -143,6 +143,7 @@ fn a_stepped_frames_window_is_the_picture_of_exactly_its_hour() {
 #[test]
 fn a_paused_side_wakes_on_seek_mode_switch_and_landed_answer_and_stops_at_rest() {
     use std::sync::mpsc;
+    use viewer_layer_core::{playhead_host::views::Need, test_support::host_recording::table};
     let (woke_send, woke_recv) = mpsc::channel::<()>();
     let composes = Arc::new(Mutex::new(0));
     let mut side = side_waking("paused wake", Box::new(Sum::new(&composes)), Arc::new(move || {
@@ -171,7 +172,7 @@ fn a_paused_side_wakes_on_seek_mode_switch_and_landed_answer_and_stops_at_rest()
     drive_until(&mut side, &woke_recv, |side| side.mode_on_screen() == Some(&switched.map_mode) && side.on_screen().is_some_and(|on| on.settled && on.drawn == Some(6)));
 
     let ask_before = side.shared.asked().expect("ask held").serial;
-    side.ask(switched, Head::Paced(6), None, None);
+    side.ask(switched.clone(), Head::Paced(6), None, None);
     {
         let turn = super::lock(&side.shared.held);
         let ask = side.shared.asked().expect("ask held");
@@ -180,9 +181,35 @@ fn a_paused_side_wakes_on_seek_mode_switch_and_landed_answer_and_stops_at_rest()
     }
     assert!(woke_recv.try_recv().is_err(), "an identical ask at rest wakes nothing");
 
+    let table = table(0);
+    let reader = side.views.reader("late column at the paused head", &[Need::columns(table, 1 << 1)]);
+    drive_until(&mut side, &woke_recv, |_| reader.frame_of(6).is_some());
+    assert!(side.with_side(|side| side.parts().unwrap().0.get(table).unwrap().holds(1)));
+    assert_eq!(side.view().map_mode, switched.map_mode);
+
     let (send, _receive) = viewer_runtime::landed::channel::<u32>();
     send.send(1).unwrap();
     woke_recv.recv_timeout(Duration::from_secs(5)).expect("a landed answer wakes a resting paused side");
+}
+
+#[test]
+fn a_view_change_keeps_independent_products_in_the_window() {
+    let (recording, _) = record(2, 8, busy);
+    let entry = open(units(recording, "hide one layer"), quick()).unwrap();
+    let first = Sum::new(&Arc::new(Mutex::new(0)));
+    let mut second = Sum::new(&Arc::new(Mutex::new(0)));
+    (second.second, second.hide_high) = (true, true);
+    let map = MapSide::with_products(entry, vec![Box::new(first), Box::new(second)], View::default()).unwrap();
+    let mut side = SideThread::new(map, Arc::new(|| {})).unwrap();
+    side.anchor(0, false, 1.0, true);
+    side.ask(View::default(), Head::Paced(3), None, None);
+    side.wait_window(|side| side.applied() == Some(3) && !side.composing() && side.draws("sum") && side.draws("second")).unwrap();
+    side.ask(View { camera_height: 4.0, ..View::default() }, Head::Paced(3), None, None);
+    side.wait_window(|side| {
+        assert!(side.draws("sum") && !side.composing(), "every window keeps the independent product during the view change");
+        side.view().camera_height == 4.0
+    }).unwrap();
+    assert!(side.with_side(|side| side.parts().is_some()));
 }
 
 struct StubOverlay {

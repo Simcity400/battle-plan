@@ -45,6 +45,7 @@ impl Fill {
 
 pub trait Paint: Send + Sync + 'static {
     fn tables(&self) -> Option<Tables>;
+    fn row_tables(&self, mode: Stock) -> Vec<TableId>;
     fn paint(&self, frame: &DecodedFrame, choice: &Choice, mode: &MapMode, selected: Option<u32>) -> io::Result<Fill>;
 }
 
@@ -71,6 +72,17 @@ impl Fills {
 
 impl Build for Fills {
     type Product = Fill;
+
+    fn row_tables(&self, view: &viewer_layer_core::layers::View) -> Vec<TableId> {
+        match view.map_mode {
+            MapMode::Stock(mode) => self.source.row_tables(mode),
+            MapMode::Scripted(_) => Vec::new(),
+        }
+    }
+
+    fn hold_picture(&self) -> bool {
+        true
+    }
 
     fn tables(&self) -> Option<Tables> {
         self.source.tables()
@@ -132,7 +144,7 @@ pub fn lines(fills: &ModeFills) -> Vec<String> {
     if !fills.drawn() {
         return Vec::new();
     }
-    match fills.product().map(|built| &built.product) {
+    match fills.product().filter(|_| viewer_layer_core::layers::Layer::mode_ready(fills)).map(|built| &built.product) {
         Some(Ok(fill)) => fill.regions.warnings.clone(),
         Some(Err(why)) => vec![format!("map mode fill: {why}")],
         None => vec![format!("map mode fill: loading, no picture of map mode {} at the head yet", fills.build().asked().0.token())],

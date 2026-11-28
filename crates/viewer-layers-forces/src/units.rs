@@ -413,7 +413,8 @@ impl Units {
     }
 
     pub fn warnings(&self) -> Vec<String> {
-        let mut lines = match (self.prepared(), self.refused()) {
+        let refusal = self.refused().or_else(|| self.models.as_ref().and_then(|models| models.refused.as_deref()));
+        let mut lines = match (self.prepared(), refusal) {
             (Some(prepared), _) => prepared.report.warnings(),
             (None, Some(why)) => return vec![format!("Unit models: not drawn: {why}")],
             (None, None) if self.drawn() => return vec!["Unit models: loading at the playback head".to_owned()],
@@ -1504,6 +1505,7 @@ impl Layer for Units {
 
     fn views(&mut self, store: &viewer_layer_core::playhead_host::views::Store) -> io::Result<()> {
         if let Some(window) = &mut self.window {
+            store.use_columns(TableId::VariantDefinitions);
             window.views = Some(store.handle());
         }
         Ok(())
@@ -1675,12 +1677,15 @@ impl Layer for Units {
         let Some(models) = &self.models else { return Ok(()) };
         let Some((_, prepared)) = models.prepared.as_ref().filter(|_| self.to_upload) else { return Ok(()) };
         let none = HashMap::new();
-        let land = self.land(self.meshes.as_ref().map_or(&none, |meshes| &meshes.meshes));
+        let land = if models.refused.is_some() { Vec::new() } else { self.land(self.meshes.as_ref().map_or(&none, |meshes| &meshes.meshes)) };
         if !self.models_new && land == self.uploaded {
             (self.to_upload, self.staged) = (false, None);
             return Ok(());
         }
-        let Some(assets) = self.ground.unit_models() else { return Ok(()) };
+        let Some(assets) = self.ground.unit_models() else {
+            self.to_upload = false;
+            return Ok(());
+        };
         let field = prepared.field_with_land(assets, land.clone());
         self.staged = Some((field, land));
         Ok(())
@@ -1702,6 +1707,7 @@ impl Layer for Units {
         let meshes = self.meshes.as_ref();
         match &models.prepared {
             None if models.waiting() => Published::Nothing,
+            _ if models.refused.is_some() && self.uploaded() => Published::Current,
             _ if self.refused.is_none() && meshes.is_some_and(meshes::Meshes::waiting) => Published::Nothing,
             Some((hour, _)) if self.uploaded() && self.carried().entities == 0 => {
                 let models = models.stands().unwrap_or(*hour);
@@ -1709,6 +1715,10 @@ impl Layer for Units {
             }
             _ => Published::Current,
         }
+    }
+
+    fn made_at(&self, hour: replay_data::Hour) -> bool {
+        self.window.is_none() || self.figures_stand(hour)
     }
 
     fn carried(&self) -> Carried {
@@ -1782,18 +1792,19 @@ impl Units {
 
 impl Units {
     pub fn figures_stand(&self, hour: replay_data::Hour) -> bool {
-        if self.refused.is_some() {
+        if let Some(models) = &self.models
+            && (!models.made_at(hour) || (models.refused.is_none() && models.waiting()))
+        {
+            return false;
+        }
+        if self.refused.is_some() || !self.showing {
             return true;
         }
-        if self.carried().entities > 0 {
-            return false;
-        }
-        let Some(models) = self.models.as_ref().filter(|_| self.showing) else { return true };
-        if models.waiting() || self.meshes.as_ref().is_some_and(|meshes| meshes.waiting() || !meshes.stand()) {
-            return false;
-        }
-        let Some((made, _)) = &models.prepared else { return false };
-        models.stands().unwrap_or(*made) >= hour && self.meshes.as_ref().and_then(|meshes| meshes.hour).is_none_or(|meshes| meshes >= hour)
+        self.carried().entities == 0
+            && (self.models.as_ref().is_none_or(|models| models.refused.is_some())
+                || self.meshes.as_ref().is_none_or(|meshes| {
+                    !meshes.waiting() && meshes.stand() && meshes.hour.is_none_or(|made| made >= hour)
+                }))
     }
 
     pub fn figures_state(&self) -> String {

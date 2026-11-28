@@ -589,7 +589,7 @@ impl Kept {
     }
 
     fn home(&self, columns: u64, mirror: Option<&Mirror>) -> bool {
-        self.set(columns).is_some() && mirror.is_some_and(|mirror| self.exact.is_some() || holds_every(mirror, self.columns, self.kinds.len()))
+        self.set(columns).is_some() && mirror.is_some_and(|mirror| mirror.keyed() && (self.exact.is_some() || holds_every(mirror, columns, self.kinds.len())))
     }
 
     fn view(&self, table: usize, columns: u64, mirror: Option<&Mirror>, order: &mut Vec<(u128, u32)>, made: &mut Made) -> SharedView {
@@ -599,7 +599,7 @@ impl Kept {
     fn view_with_failure(&self, table: usize, columns: u64, mirror: Option<&Mirror>, order: &mut Vec<(u128, u32)>, made: &mut Made) -> (SharedView, Option<view::HeadFailure>) {
         let Some(at) = self.set(columns) else { return (not_declared(TableId::ALL[table]), None) };
         let set = &self.views[at];
-        let Some(mirror) = mirror.filter(|mirror| self.exact.is_some() || holds_every(mirror, set.columns, self.kinds.len())) else {
+        let Some(mirror) = mirror.filter(|mirror| mirror.keyed() && (self.exact.is_some() || holds_every(mirror, set.columns, self.kinds.len()))) else {
             viewer_runtime::view_record::add("map views", "sets_withheld", 1);
             return (not_declared(TableId::ALL[table]), None);
         };
@@ -786,13 +786,14 @@ struct Shared {
     unwritten: Vec<std::sync::OnceLock<SharedView>>,
     entry: Arc<Entry>,
     script_values: Arc<ScriptValues>,
-    variant_columns: Option<Arc<ExactColumns>>,
+    exact_columns: Mutex<BTreeMap<usize, Arc<ExactColumns>>>,
     script_values_view: Mutex<Option<((Hour, BranchId, u64), SharedView)>>,
     learned: Mutex<BTreeMap<(&'static str, usize), (Option<Hour>, u64)>>,
     asked: Mutex<Vec<Asked>>,
     demand: AtomicU64,
     wake: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    on_publish: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    on_publish: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
+    whole_progress: Arc<std::sync::OnceLock<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
     chosen: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
@@ -839,7 +840,20 @@ impl Shared {
 
     fn note_demand(&self) {
         self.demand.fetch_add(1, Ordering::Release);
+        if let Some(wake) = self.whole_progress.get() {
+            wake();
+        }
         let wake = lock(&self.wake).clone();
+        if let Some(wake) = wake {
+            wake();
+        }
+    }
+
+    fn notify_progress(&self) {
+        if let Some(wake) = self.whole_progress.get() {
+            wake();
+        }
+        let wake = lock(&self.on_publish).clone();
         if let Some(wake) = wake {
             wake();
         }
@@ -880,18 +894,8 @@ pub struct Store {
 
 impl Store {
     pub fn new(entry: &Arc<Entry>) -> Self {
-        Self::open(entry, false)
-    }
-
-    pub(super) fn for_map(entry: &Arc<Entry>) -> Self {
-        Self::open(entry, true)
-    }
-
-    fn open(entry: &Arc<Entry>, map: bool) -> Self {
         let written = entry.pages.written_tables(&crate::playhead_host::timeline_runs(entry), TABLE_COUNT);
         let script_values = Arc::new(ScriptValues::new(entry, written[SCRIPT_VALUES.index()].clone()));
-        let variants = TableId::VariantDefinitions;
-        let variant_columns = map.then(|| Arc::new(ExactColumns::new(entry, variants, written[variants.index()].clone())));
         let shared = Shared {
             kept: RwLock::new((0..TABLE_COUNT).map(|_| None).collect()),
             jobs: Mutex::default(),
@@ -907,13 +911,14 @@ impl Store {
             unwritten: (0..TABLE_COUNT).map(|_| std::sync::OnceLock::new()).collect(),
             entry: Arc::clone(entry),
             script_values,
-            variant_columns,
+            exact_columns: Mutex::default(),
             script_values_view: Mutex::default(),
             learned: Mutex::default(),
             asked: Mutex::default(),
             demand: AtomicU64::new(0),
             wake: Mutex::default(),
-            on_publish: Mutex::default(),
+            on_publish: Arc::default(),
+            whole_progress: Arc::default(),
             #[cfg(test)]
             chosen: Mutex::default(),
             #[cfg(test)]
@@ -924,6 +929,25 @@ impl Store {
 
     pub fn set_wake(&self, wake: Arc<dyn Fn() + Send + Sync>) {
         *lock(&self.shared.wake) = Some(wake);
+    }
+
+    pub(super) fn set_whole_wake(&self, wake: Arc<dyn Fn() + Send + Sync>) {
+        let _ = self.shared.whole_progress.set(wake);
+    }
+
+    pub fn use_columns(&self, table: TableId) {
+        let at = table.index();
+        let mut kept = writing(&self.shared);
+        let mut columns = lock(&self.shared.exact_columns);
+        let std::collections::btree_map::Entry::Vacant(slot) = columns.entry(at) else { return };
+        let source = slot.insert(Arc::new(ExactColumns::new(&self.shared.entry, table, self.shared.written[at].clone())));
+        if let Some(held) = &mut kept[at] {
+            held.exact = Some(Arc::clone(source));
+            held.arriving();
+        }
+        drop(columns);
+        drop(kept);
+        self.shared.note_demand();
     }
 
     pub fn demand(&self) -> u64 {
@@ -939,6 +963,10 @@ impl Store {
     }
 
     pub fn declared(&self) -> Vec<playhead::Declared> {
+        self.declarations().into_iter().map(|(read, _)| read).collect()
+    }
+
+    pub(super) fn declarations(&self) -> Vec<(playhead::Declared, bool)> {
         let mut wanted: BTreeMap<usize, u64> = reading(&self.shared).iter().enumerate().filter_map(|(table, kept)| Some((table, kept.as_ref()?.columns))).collect();
         for asked in lock(&self.shared.asked).iter() {
             if let Asked::Open { needs, .. } | Asked::Declare { needs, .. } = asked {
@@ -947,13 +975,14 @@ impl Store {
                 }
             }
         }
+        let exact = lock(&self.shared.exact_columns);
         wanted
             .into_iter()
             .filter(|&(table, _)| table != SCRIPT_VALUES.index() && matches!(self.shared.written.get(table), Some(playhead::pages::TableWritten::Written)))
             .filter_map(|(table, mask)| {
                 let width = self.shared.kinds.get(table)?.len();
                 let columns = (0..width).filter(|&column| column >= 64 || mask & (1 << column) != 0).collect();
-                Some(playhead::Declared { table, columns, keyed: true, passing: false, hourly: false })
+                Some((playhead::Declared { table, columns, keyed: true, passing: false, hourly: false }, exact.contains_key(&table)))
             })
             .collect()
     }
@@ -970,13 +999,7 @@ impl Store {
         Noting { kept: writing(&self.shared), layers }
     }
 
-    pub fn post(&mut self, mirrors: &Arc<Mirrors>, hour: Hour, branch: BranchId, epoch: u64, whole: bool) {
-        self.settled();
-        {
-            let mut jobs = lock(&self.shared.jobs);
-            jobs.from = Some(Posted { mirrors: Arc::clone(mirrors), hour, branch, epoch, deferred: Some(BTreeSet::new()) });
-            jobs.running += 1;
-        }
+    pub(super) fn accept_asks(&self) {
         let asked = std::mem::take(&mut *lock(&self.shared.asked));
         for asked in asked {
             match asked {
@@ -988,6 +1011,16 @@ impl Store {
                 Asked::Close { id } => close(&self.shared, id),
             }
         }
+    }
+
+    pub fn post(&mut self, mirrors: &Arc<Mirrors>, hour: Hour, branch: BranchId, epoch: u64, whole: bool) {
+        self.settled();
+        {
+            let mut jobs = lock(&self.shared.jobs);
+            jobs.from = Some(Posted { mirrors: Arc::clone(mirrors), hour, branch, epoch, deferred: Some(BTreeSet::new()) });
+            jobs.running += 1;
+        }
+        self.accept_asks();
         let kept = reading(&self.shared);
         let mut readers = lock(&self.shared.readers);
         self.shared.epoch.store(epoch, Ordering::Release);
@@ -1228,6 +1261,24 @@ impl Views {
 
     pub fn set_on_publish(&self, wake: Arc<dyn Fn() + Send + Sync>) {
         *lock(&self.shared.on_publish) = Some(wake);
+    }
+
+    pub fn notify_progress(&self) {
+        self.shared.notify_progress();
+    }
+
+    pub fn progress_notifier(&self) -> Arc<dyn Fn() + Send + Sync> {
+        let progress = Arc::clone(&self.shared.whole_progress);
+        let on_publish = Arc::clone(&self.shared.on_publish);
+        Arc::new(move || {
+            if let Some(wake) = progress.get() {
+                wake();
+            }
+            let wake = lock(&on_publish).clone();
+            if let Some(wake) = wake {
+                wake();
+            }
+        })
     }
 
     pub fn demand(&self) -> u64 {
@@ -1720,10 +1771,7 @@ fn publish(shared: &Shared, kept: &[Option<Kept>], mirrors: &Mirrors, places: &[
     shared.made.notify_all();
     if published {
         shared.entry.playhead().wake_waiters();
-        let on_publish = lock(&shared.on_publish).clone();
-        if let Some(wake) = on_publish {
-            wake();
-        }
+        shared.notify_progress();
     }
 }
 
@@ -1838,6 +1886,15 @@ pub struct Reader {
 }
 
 impl Reader {
+    pub fn notify_progress(&self) {
+        self.shared.notify_progress();
+    }
+
+    pub fn has_rows_at(&self, hour: Hour) -> bool {
+        let readers = lock(&self.shared.readers);
+        Self::place(&readers, self.id).and_then(|at| readers[at].stands()) == Some((hour, self.seek()))
+    }
+
     fn place(readers: &[Reading], id: u64) -> Option<usize> {
         readers.iter().position(|held| held.id == id)
     }
@@ -2121,9 +2178,7 @@ fn declare(shared: &Arc<Shared>, id: u64, needs: &[Need], republishes: bool) {
             let Some(kinds) = shared.kinds.get(table) else { continue };
             let held = kept[table].get_or_insert_with(|| {
                 let mut held = Kept::new(kinds.clone());
-                if table == TableId::VariantDefinitions.index() {
-                    held.exact = shared.variant_columns.clone();
-                }
+                held.exact = lock(&shared.exact_columns).get(&table).cloned();
                 held
             });
             let columns = sets.iter().fold(0, |columns, &(set, _, _)| columns | set);

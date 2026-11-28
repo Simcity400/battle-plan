@@ -2,7 +2,7 @@
 mod tests;
 
 use crate::map_open::MapSide;
-use viewer_layer_core::playhead_host::{details, mirror::{Cell, Mirror, Mirrors}};
+use viewer_layer_core::playhead_host::{details, mirror::{Mirror, Mirrors}};
 use viewer_layer_core::{layers::Layer, vision::Vision};
 use viewer_layers_forces::{aircraft::Aircraft, orders::Orders, units::Units};
 use viewer_layers_infrastructure::{intel::Intel, strikes::Strikes, trains::Trains};
@@ -12,6 +12,7 @@ use replay_data::rows::{Field, NativeValue, Opaque, Recorded, ShipCounterInputs,
 use std::{
     collections::{BTreeMap, HashMap},
     io,
+    sync::Arc,
     time::Duration,
 };
 use viewer_foundation::tables::{
@@ -42,57 +43,140 @@ fn column(table: TableId, field: &str) -> Option<usize> {
     (0..).map_while(|column| table.field_name(column).map(|name| (column, name))).find(|&(_, name)| name == field).map(|(column, _)| column)
 }
 
-fn rows_of(mirrors: &Mirrors, table: TableId) -> Option<&Mirror> {
-    mirrors.get(table).filter(|mirror| matches!(mirror.status(), Some(Status::Complete | Status::Truncated { .. })) && mirror.rows().next().is_some())
+enum WarningRows<'a> {
+    Mirrored(&'a Mirror),
+    Recorded(Box<playhead::lane::Lane>),
 }
 
-fn columns_of<'m, const N: usize>(mirrors: &'m Mirrors, table: TableId, fields: [&str; N], line: &str, missing: &mut Vec<String>) -> Option<(&'m Mirror, [usize; N])> {
-    let rows = rows_of(mirrors, table)?;
-    let mut columns = [0; N];
-    for (at, field) in fields.into_iter().enumerate() {
-        match column(table, field).filter(|&column| rows.holds(column)) {
-            Some(column) => columns[at] = column,
-            None => {
-                missing.push(format!("{NOT_GIVEN}{line}: no drawn layer reads {table:?}.{field}"));
-                return None;
-            }
+impl WarningRows<'_> {
+    fn rows(&self) -> Box<dyn Iterator<Item = u32> + '_> {
+        match self {
+            Self::Mirrored(rows) => Box::new(rows.rows()),
+            Self::Recorded(lane) => match lane.read_rows() {
+                Some(read) => Box::new(read.iter().copied()),
+                None => Box::new(lane.cells().rows()),
+            },
         }
     }
-    Some((rows, columns))
+
+    fn slot(&self, key: u128) -> Option<u32> {
+        match self {
+            Self::Mirrored(rows) => rows.slot(key),
+            Self::Recorded(lane) => lane.view().slot(key).filter(|slot| lane.read_rows().is_none_or(|read| read.binary_search(slot).is_ok())),
+        }
+    }
+
+    fn number(&self, column: usize, slot: u32) -> Option<u64> {
+        match self {
+            Self::Mirrored(rows) => rows.raw_cell(column, slot),
+            Self::Recorded(lane) => lane.view().number(column, slot).map(|number| number as u64),
+        }
+    }
+
+    fn list(&self, column: usize, slot: u32) -> (Option<&[u8]>, u16) {
+        match self {
+            Self::Mirrored(rows) => (rows.list_cell(column, slot).value(), rows.format()),
+            Self::Recorded(lane) => (lane.view().list(column, slot), lane.format()),
+        }
+    }
 }
 
-fn decoded<T: NativeValue>(cell: Cell<&[u8]>, format: u16) -> Option<T> {
+fn rows_of<'a>(head: &Head<'_>, mirrors: Option<&'a Mirrors>, table: TableId, columns: &[usize]) -> io::Result<Option<WarningRows<'a>>> {
+    if let Some(rows) = mirrors.and_then(|mirrors| mirrors.get(table)).filter(|rows| {
+        rows.complete() && columns.iter().all(|&column| rows.holds(column))
+    }) {
+        return Ok(rows.rows().next().is_some().then_some(WarningRows::Mirrored(rows)));
+    }
+    let entry = head.side.entry();
+    let Some(piece) = entry.playhead().timeline().pieces().iter().find(|piece| piece.first <= head.hour && head.hour <= piece.last) else { return Ok(None) };
+    let (pages, index) = (entry.pages(), table.index());
+    if let Some(reason) = pages.withheld_at(piece.run, index, head.hour) {
+        return Err(io::Error::other(reason.to_owned()));
+    }
+    if pages.kinds(index).is_none() {
+        return Ok(None);
+    }
+    let (status, _, reason) = playhead::lane::table_status(&**pages, piece.run, index, head.hour)?;
+    match status {
+        Status::Complete | Status::Truncated { .. } => {}
+        Status::NotRecorded => return Ok(None),
+        Status::Unavailable { .. } => return Err(io::Error::other(reason.unwrap_or_else(|| format!("{table:?} is unavailable")))),
+    }
+    let mut lane = playhead::lane::Lane::new(Arc::clone(pages), piece.run, index, columns, table == TableId::WeatherProvinces)?;
+    lane.seek(head.hour)?;
+    if lane.read_rows().map_or_else(|| lane.cells().rows().next().is_none(), <[u32]>::is_empty) {
+        return Ok(None);
+    }
+    if let Some(&column) = columns.iter().find(|column| !lane.reads().contains(column)) {
+        return Err(io::Error::other(format!("the recording does not hold {table:?}.{}", table.field_name(column).unwrap_or("unknown field"))));
+    }
+    Ok(Some(WarningRows::Recorded(Box::new(lane))))
+}
+
+fn columns_of<'m, const N: usize>(head: &Head<'_>, mirrors: Option<&'m Mirrors>, table: TableId, fields: [&str; N], line: &str, missing: &mut Vec<String>) -> Option<(WarningRows<'m>, [usize; N])> {
+    let mut columns = [0; N];
+    for (at, field) in fields.into_iter().enumerate() {
+        columns[at] = column(table, field)?;
+    }
+    match rows_of(head, mirrors, table, &columns) {
+        Ok(rows) => rows.map(|rows| (rows, columns)),
+        Err(error) => {
+            missing.push(format!("{NOT_GIVEN}{line}: {error}"));
+            None
+        }
+    }
+}
+
+fn decoded<T: NativeValue>((cell, format): (Option<&[u8]>, u16)) -> io::Result<T> {
     let field = match cell {
-        Cell::Value(bytes) => Field::Opaque(Opaque::Encoded(bytes, format)),
-        _ => Field::NotRecorded,
+        Some(bytes) => Field::Opaque(Opaque::Encoded(bytes, format)),
+        None => Field::NotRecorded,
     };
-    T::from_field(field).ok()
+    T::from_field(field)
 }
 
-fn facts(mirrors: &Mirrors) -> (RowFacts, Vec<String>) {
+fn facts(head: &Head<'_>) -> (RowFacts, Vec<String>) {
+    let mirrors = head.side.parts().map(|(mirrors, _)| mirrors);
     let mut missing = Vec::new();
-    let count = |(rows, [column]): (&Mirror, [usize; 1])| rows.rows().filter(|&slot| rows.raw_cell(column, slot).is_some_and(|value| value != 0)).count();
-    let unreadable_naval_bases = columns_of(mirrors, TableId::NavalBases, ["countries_unreadable"], "Field Naval base access lists", &mut missing).map_or(0, count);
-    let unreadable_templates = columns_of(mirrors, TableId::DivisionTemplateIcons, ["model_unreadable"], "Field Division template model inputs", &mut missing).map_or(0, count);
-    let ship_counters = columns_of(mirrors, TableId::ShipModels, ["counter"], "Field ShipModels formation", &mut missing).map(|(rows, [column])| rows.rows().all(|slot| decoded::<Option<ShipCounterInputs>>(rows.list_cell(column, slot), rows.format()).flatten().is_some()));
-    let weather = columns_of(mirrors, TableId::WeatherRegions, ["light_rain", "heavy_rain", "snow", "blizzard", "sandstorm"], "Field weather particle presentation", &mut missing)
-        .is_some_and(|(rows, columns)| rows.rows().any(|slot| columns.iter().any(|&column| rows.raw_cell(column, slot).is_some_and(|value| value != 0))));
+    let count = |(rows, [column]): (WarningRows<'_>, [usize; 1])| rows.rows().filter(|&slot| rows.number(column, slot).is_some_and(|value| value != 0)).count();
+    let unreadable_naval_bases = columns_of(head, mirrors, TableId::NavalBases, ["countries_unreadable"], "Field Naval base access lists", &mut missing).map_or(0, count);
+    let unreadable_templates = columns_of(head, mirrors, TableId::DivisionTemplateIcons, ["model_unreadable"], "Field Division template model inputs", &mut missing).map_or(0, count);
+    let ship_counters = columns_of(head, mirrors, TableId::ShipModels, ["counter"], "Field ShipModels formation", &mut missing).and_then(|(rows, [column])| {
+        match rows.rows().try_fold(true, |all, slot| {
+            decoded::<Option<ShipCounterInputs>>(rows.list(column, slot)).map(|counter| all && counter.is_some())
+        }) {
+            Ok(all) => Some(all),
+            Err(error) => {
+                missing.push(format!("{NOT_GIVEN}Field ShipModels formation: ShipModels.counter could not be read: {error}"));
+                None
+            }
+        }
+    });
+    let weather = columns_of(head, mirrors, TableId::WeatherRegions, ["light_rain", "heavy_rain", "snow", "blizzard", "sandstorm"], "Field weather particle presentation", &mut missing)
+        .is_some_and(|(rows, columns)| rows.rows().any(|slot| columns.iter().any(|&column| rows.number(column, slot).is_some_and(|value| value != 0))));
     let mut display_missing = Vec::new();
-    let weather_display = columns_of(mirrors, TableId::WeatherProvinces, ["display"], "Field WeatherProvinces.display", &mut display_missing).map(|(rows, [column])| {
-        match rows.slot(0).map(|slot| decoded::<Recorded<Option<WeatherDisplay>>>(rows.list_cell(column, slot), rows.format())) {
-            Some(Some(Recorded::Value(Some(_)))) => None,
-            Some(Some(Recorded::NotRecorded)) => Some(DISPLAY_NOT_RECORDED),
+    let weather_display = columns_of(head, mirrors, TableId::WeatherProvinces, ["display"], "Field WeatherProvinces.display", &mut display_missing).map(|(rows, [column])| {
+        match rows.slot(0).map(|slot| decoded::<Recorded<Option<WeatherDisplay>>>(rows.list(column, slot))) {
+            Some(Ok(Recorded::Value(Some(_)))) => None,
+            Some(Ok(Recorded::NotRecorded)) => Some(DISPLAY_NOT_RECORDED),
             _ => Some(DISPLAY_UNAVAILABLE),
         }
     });
     if !display_missing.is_empty() {
         missing.extend(display_missing);
-        missing.push(format!("{NOT_GIVEN}Field Winter grading: no drawn layer reads WeatherProvinces.display, which decides whether it is stated"));
+        missing.push(format!("{NOT_GIVEN}Field Winter grading: it requires the recording's WeatherProvinces.display"));
     }
+    let mut present = |table, line| match rows_of(head, mirrors, table, &[]) {
+        Ok(rows) => rows.is_some(),
+        Err(error) => {
+            missing.push(format!("{NOT_GIVEN}{line}: {error}"));
+            false
+        }
+    };
     let facts = RowFacts {
         unreadable_naval_bases,
-        divisions: rows_of(mirrors, TableId::Divisions).is_some(),
-        task_forces: rows_of(mirrors, TableId::TaskForces).is_some(),
+        divisions: present(TableId::Divisions, "Field Counter presentation"),
+        task_forces: present(TableId::TaskForces, "Field Naval counter presentation"),
         unreadable_templates,
         ship_counters,
         weather,
@@ -114,11 +198,10 @@ fn raid_notes(side: &MapSide) -> Option<std::sync::Arc<Vec<String>>> {
     viewer_layers_political::scripts::notes(side, ours)
 }
 
-fn made(side: &MapSide, head: &Head<'_>, raids: &[String]) -> Vec<String> {
-    let Some((mirrors, layers)) = side.parts() else { return table_limitations(head, &RowFacts::default()).into_lines() };
-    let (facts, missing) = facts(mirrors);
-    let mut lines = table_limitations(head, &facts).into_lines();
-    lines.extend(missing);
+fn made(side: &MapSide, head: &Head<'_>, raids: &[String], (facts, missing): &(RowFacts, Vec<String>)) -> Vec<String> {
+    let mut lines = table_limitations(head, facts).into_lines();
+    lines.extend_from_slice(missing);
+    let Some((_, layers)) = side.parts() else { return lines };
     if let Some(trains) = drawn::<Trains>(side, layers, "trains") {
         lines.extend(trains.notes(head));
     }
@@ -162,9 +245,25 @@ fn made(side: &MapSide, head: &Head<'_>, raids: &[String]) -> Vec<String> {
 }
 
 pub fn lines(side: &MapSide) -> Option<Vec<String>> {
+    cached_lines(side, &mut Default::default())
+}
+
+#[derive(Default)]
+pub(crate) struct FactsCache {
+    at: Option<(replay_data::Hour, u64)>,
+    findings: (RowFacts, Vec<String>),
+}
+
+pub(crate) fn cached_lines(side: &MapSide, cache: &mut FactsCache) -> Option<Vec<String>> {
     let hour = side.applied()?;
+    let head = Head { side, hour, wait: Duration::ZERO };
+    let at = (hour, side.entry().playhead().epoch());
+    if cache.at != Some(at) {
+        cache.findings = facts(&head);
+        cache.at = Some(at);
+    }
     let raids = raid_notes(side);
-    let mut lines = made(side, &Head { side, hour, wait: Duration::ZERO }, raids.as_deref().map_or(&[], Vec::as_slice));
+    let mut lines = made(side, &head, raids.as_deref().map_or(&[], Vec::as_slice), &cache.findings);
     lines.extend(side.refusals().map(|(name, why)| format!("Layer {name} is refused: {why}")));
     Some(lines)
 }
@@ -297,7 +396,7 @@ pub fn differ(side: &MapSide, every: &replay_frame::frame::DecodedFrame, today: 
     let apart: Vec<TableId> = TableId::ALL.into_iter().filter(|&table| matches!(head.seen(table), Seen::NotRecorded(_)) && !matches!(every.seen(table), Seen::NotRecorded(_))).collect();
     let counted_apart = |line: &str| apart.iter().any(|table| line.starts_with(&format!("Table {table:?} ")));
     let (mut ours, mut not_given, mut stood) = (Vec::new(), Vec::new(), Vec::new());
-    for line in made(side, &head, raids.unwrap_or_default()) {
+    for line in made(side, &head, raids.unwrap_or_default(), &facts(&head)) {
         match line.strip_prefix(NOT_GIVEN) {
             Some(rest) => {
                 stood.push(format!("{}:", rest.split(": ").next().unwrap_or(rest)));
@@ -318,8 +417,8 @@ pub fn differ(side: &MapSide, every: &replay_frame::frame::DecodedFrame, today: 
         "aircraft" => drawn::<Aircraft>(side, layers, "aircraft").is_some_and(Aircraft::drawn),
         name => side.draws(name),
     };
-    let held = |table: TableId| side.parts().is_some_and(|(mirrors, _)| mirrors.get(table).is_some());
-    let (theirs, not_registered) = by_registered(today.iter().filter(|line| !counted_apart(line)), &status_notes(&head), registered, held);
+    let recorded = |table| !apart.contains(&table);
+    let (theirs, not_registered) = by_registered(today.iter().filter(|line| !counted_apart(line)), &status_notes(&head), registered, recorded);
     let theirs: Vec<&String> = theirs.into_iter().filter(|line| !stood.iter().any(|prefix| line.starts_with(prefix.as_str()))).collect();
     let (missing, extra, matched, reordered) = by_text(&ours, &theirs);
     let first = missing.first().map(|line| format!("at {hour} today's line is not at the head: {line:?}")).or_else(|| extra.first().map(|line| format!("at {hour} the head's line is not today's: {line:?}")));

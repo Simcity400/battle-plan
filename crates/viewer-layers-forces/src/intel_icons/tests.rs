@@ -20,7 +20,7 @@ struct Count;
 impl Evaluate for Count {
     fn icons(&self, frame: &DecodedFrame, _choice: &perspective::Choice) -> IntelIcons {
         let links = frame.complete::<tables::CountryLinks>().map(<[_]>::len).ok();
-        let humans = frame.complete::<tables::HumanControllers>().map(<[_]>::len).ok();
+        let humans = if frame.hour >= 2 { frame.complete::<tables::HumanControllers>().map(<[_]>::len).ok() } else { None };
         let mut icons = IntelIcons { built_for: Some((frame.branch, frame.hour, 0)), ..IntelIcons::default() };
         icons.report.reasons.insert(format!("links {links:?}, humans {humans:?}, on {:?}", std::thread::current().name()), 1);
         icons
@@ -49,7 +49,7 @@ fn layer(side: &MapSide) -> &Icons {
 }
 
 fn side(name: &str) -> MapSide {
-    let entry = open(units(record(HOURS, campaign), name), quick()).unwrap();
+    let entry = open(units(record(HOURS, campaign), name), playhead::Settings { speed: 1.0, ..quick() }).unwrap();
     let icons = Icons::new(Arc::new(Count), Pace::Ready);
     let mut side = MapSide::new(entry, vec![Box::new(icons)], operatives()).unwrap();
     side.set_branch(RECORDING.branch);
@@ -62,33 +62,44 @@ fn state(side: &MapSide) -> String {
     format!("icons {:?}, applied {:?}, open (busy, handed, seen, rows, error) {open:?}, tables {:?}, {:?}", layer.icons().map(|(_, hour)| hour), layer.applied, layer.tables(), layer.stats())
 }
 
-fn at(side: &mut MapSide, hour: replay_data::Hour, what: &str, done: impl Fn(&Icons) -> bool) {
+fn at(side: &mut MapSide, hour: replay_data::Hour, what: &str, mut done: impl FnMut(&mut MapSide) -> bool) {
     let until = Instant::now() + Duration::from_secs(60);
     loop {
         side.frame(hour).unwrap();
-        if !side.composing() {
-            side.settle_all().unwrap();
-            if done(layer(side)) {
-                return;
-            }
+        if !side.composing() && done(side) {
+            return;
         }
-        assert!(Instant::now() < until, "{what}: never; {}", state(side));
+        assert!(Instant::now() < until, "{what}: never; {}", if side.composing() { side.waiting_state(hour) } else { state(side) });
         std::thread::yield_now();
     }
 }
 
 fn icons_at(side: &mut MapSide, hour: replay_data::Hour, what: &str) {
     sought(side, hour);
-    at(side, hour, what, |layer| layer.icons().is_some_and(|(_, at)| at == hour));
+    settled_icons(side, hour, what);
+}
+
+fn settled_icons(side: &mut MapSide, hour: replay_data::Hour, what: &str) {
+    at(side, hour, what, |side| {
+        side.settle_all().unwrap();
+        layer(side).icons().is_some_and(|(_, at)| at == hour)
+    });
 }
 
 fn learned_at(side: &mut MapSide, hour: replay_data::Hour) {
-    sought(side, hour);
-    at(side, hour, "the reader opens", Icons::is_open);
-    assert!(read(side).is_none() && drawn(side.layer_parts()).is_none(), "while its tables load the window keeps today's icons");
-    sought(side, hour);
-    at(side, hour, "the table the content reads is learned", |layer| layer.tables().contains(&TableId::HumanControllers));
-    icons_at(side, hour, "the icons of the hour");
+    icons_at(side, 0, "the icons before learning another table");
+    let mut held = drawn(side.layer_parts()).unwrap();
+    assert!(!layer(side).tables().contains(&TableId::HumanControllers));
+    at(side, hour, "the worker learns the table its content reads", |side| {
+        let icons = drawn(side.layer_parts()).expect("while a new table loads, the window keeps its icons");
+        let learned = layer(side).tables().contains(&TableId::HumanControllers);
+        if learned {
+            assert!(Arc::ptr_eq(&held, &icons));
+        }
+        held = icons;
+        learned
+    });
+    settled_icons(side, hour, "the icons of the hour");
 }
 
 fn play(side: &mut MapSide, from: replay_data::Hour, what: &str, mut each: impl FnMut(&MapSide, &viewer_layer_core::playhead_host::Frame) -> bool) {
@@ -155,7 +166,7 @@ fn in_another_map_mode_it_declares_nothing_and_holds_nothing_and_opens_again_wit
     assert!(layer(&side).icons().is_none() && drawn(side.layer_parts()).is_none(), "no icons");
     assert!(layer(&side).held() <= 64 * std::mem::size_of::<TableId>(), "only the names of the tables it learned: {}", layer(&side).held());
     side.set_view(operatives()).unwrap();
-    at(&mut side, 2, "the reader opens again", Icons::is_open);
+    at(&mut side, 2, "the reader opens again", |side| layer(side).is_open());
     icons_at(&mut side, 40, "the icons opened again");
     let stats = layer(&side).stats();
     assert_eq!(stats.learning, learned, "opened with the tables it learned, nothing is discarded");

@@ -384,15 +384,7 @@ impl Ring {
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn has_ready(&self, id: usize, head: Hour) -> bool {
-        let Some(seat) = self.consumers[id].as_ref().filter(|seat| seat.parked.is_none()) else {
-            return false;
-        };
-        if let Some((before, step)) = seat.own.front()
-            && *before <= seat.next
-        {
-            return step.last <= head;
-        }
-        self.built.get(next_of(&self.built, seat.next)).is_some_and(|step| step.last <= head)
+        self.reaches(id, head)
     }
 
     pub(crate) fn ahead(&self, id: usize, out: &mut Vec<Arc<Step>>) {
@@ -410,10 +402,14 @@ impl Ring {
     }
 
     pub(crate) fn reaches(&self, id: usize, head: Hour) -> bool {
-        let Some(seat) = self.consumers[id].as_ref().filter(|seat| seat.parked.is_none()) else { return false };
+        self.next_hour(id).is_some_and(|next| next <= head)
+    }
+
+    pub(crate) fn next_hour(&self, id: usize) -> Option<Hour> {
+        let seat = self.consumers[id].as_ref().filter(|seat| seat.parked.is_none())?;
         match seat.own.front().filter(|(before, _)| *before <= seat.next) {
-            Some((_, step)) => step.last <= head,
-            None => self.built.get(next_of(&self.built, seat.next)).is_some_and(|step| step.last <= head),
+            Some((_, step)) => Some(step.last),
+            None => self.built.get(next_of(&self.built, seat.next)).map(|step| step.last),
         }
     }
 

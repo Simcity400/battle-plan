@@ -51,14 +51,14 @@ const UNIT_COUNTERS: &[TableId] = &[
 
 const LAND_COMBATS: &[TableId] = &[TableId::LandCombatDivisions, TableId::LandCombatSides, TableId::LandCombatDetails];
 
+const NAVAL_LOOKUPS: &[TableId] = &[TableId::NavalMissionCommanders, TableId::NavalMissionCountries, TableId::ModifierDefinitions];
+const AIR_LOOKUPS: &[TableId] = &[TableId::AirCountryRelations];
+
 const NAVAL_MISSIONS: &[TableId] = &[
     TableId::NavalMissionLedgers,
     TableId::NavalMissionTaskForces,
-    TableId::NavalMissionCommanders,
-    TableId::NavalMissionCountries,
     TableId::NavalDominanceTaskForceRanges,
     TableId::SliceReads,
-    TableId::ModifierDefinitions,
     TableId::WeatherProvinces,
 ];
 
@@ -70,7 +70,6 @@ const BASE_ICONS: &[TableId] = &[
     TableId::AirMissionInputs,
     TableId::AirGroundCrews,
     TableId::AirRegionCombat,
-    TableId::AirCountryRelations,
     TableId::WingEquipment,
     TableId::FacilityMapFlags,
     TableId::AirSortieBaseCountries,
@@ -172,7 +171,9 @@ pub fn tables_shown(shown: Shown) -> Vec<TableId> {
         .chain(family(shown.units, UNIT_COUNTERS))
         .chain(family(shown.land_combats, LAND_COMBATS))
         .chain(family(shown.naval_missions, NAVAL_MISSIONS))
+        .chain(family(shown.naval_missions, NAVAL_LOOKUPS))
         .chain(family(shown.bases, BASE_ICONS))
+        .chain(family(shown.bases, AIR_LOOKUPS))
         .copied()
         .collect();
     tables.sort_unstable_by_key(|table| table.index());
@@ -262,8 +263,8 @@ fn installs(laid: (u64, Hour), generation: u64, held: Option<Hour>) -> bool {
     laid.0 == generation && held.is_none_or(|held| held <= laid.1)
 }
 
-fn joins_on(whole: bool, answered: bool, out: bool) -> bool {
-    whole && !answered && !out
+fn joins_on(whole: bool, answered: bool, out: bool, rows_ready: impl FnOnce() -> bool) -> bool {
+    whole && !answered && !out && rows_ready()
 }
 
 fn stands(hour: Option<Hour>, missed: usize, head: Hour) -> bool {
@@ -551,6 +552,7 @@ pub struct Overlay {
     content: Arc<Content>,
     ask: Option<Ask>,
     shared: Arc<Shared>,
+    rows: Option<Arc<views::Reader>>,
     worker: Option<JoinHandle<()>>,
     generation: u64,
     stamp: u64,
@@ -580,6 +582,7 @@ impl Overlay {
             content,
             ask: None,
             shared: Arc::new(Shared { held: Mutex::new(Held::default()), signal: Condvar::new() }),
+            rows: None,
             worker: None,
             generation: 0,
             stamp: 0,
@@ -815,10 +818,12 @@ impl Overlay {
             return;
         }
         let tables = self.content.tables;
+        store.use_columns(TableId::VariantDefinitions);
+        let rows = Arc::new(store.reader("overlay", &overlay_needs()));
         let maker = Maker {
             content: Arc::clone(&self.content),
             shared: Arc::clone(&self.shared),
-            rows: store.reader("overlay", &overlay_needs()),
+            rows: Arc::clone(&rows),
             declared: overlay_tables(),
             learned: Vec::new(),
             shown: Shown::EVERY,
@@ -843,7 +848,7 @@ impl Overlay {
             maker.work();
         });
         match started {
-            Ok(worker) => self.worker = Some(worker),
+            Ok(worker) => (self.worker, self.rows) = (Some(worker), Some(rows)),
             Err(error) => self.ask_notes.push(format!("the overlay's maker cannot start: {error}")),
         }
     }
@@ -864,7 +869,9 @@ impl Overlay {
             }
             let now = Instant::now();
             let answered = if held.answered_stamp.0 == self.generation { held.answered_stamp.1 } else { 0 };
-            if held.stop || !joins_on(settling.strict(), answered >= stamp, now >= until) {
+            if held.stop || !joins_on(settling.strict(), answered >= stamp, now >= until, || {
+                self.rows.as_ref().is_some_and(|rows| rows.has_rows_at(hour))
+            }) {
                 break;
             }
             held = shared.signal.wait_timeout(held, until - now).unwrap_or_else(std::sync::PoisonError::into_inner).0;
@@ -1016,7 +1023,7 @@ enum TablesBuilt {
 struct Maker {
     content: Arc<Content>,
     shared: Arc<Shared>,
-    rows: views::Reader,
+    rows: Arc<views::Reader>,
     declared: Vec<TableId>,
     learned: Vec<TableId>,
     shown: Shown,
@@ -1195,13 +1202,17 @@ impl Maker {
 
     fn declare_now(&mut self, shown: Shown) {
         let mut tables = tables_shown(shown);
+        tables.extend(NAVAL_LOOKUPS.iter().chain(AIR_LOOKUPS).copied());
         tables.extend(self.learned.iter().copied());
         tables.sort_unstable_by_key(|table| table.index());
         tables.dedup();
         self.shown = shown;
         if self.declared != tables {
+            let held = lock(&self.shared.held);
             self.rows.declare_only(&tables);
             self.declared = tables;
+            drop(held);
+            self.shared.signal.notify_all();
         }
     }
 
@@ -1368,6 +1379,7 @@ impl Maker {
         drop(held);
         timeline::mark(self.marks, Mark::Published);
         self.shared.signal.notify_all();
+        self.rows.notify_progress();
     }
 
     fn finish(&mut self, want: &Wanted, outcome: Outcome) {
@@ -1401,6 +1413,7 @@ impl Maker {
         }
         drop(held);
         self.shared.signal.notify_all();
+        self.rows.notify_progress();
     }
 }
 
@@ -1429,6 +1442,10 @@ impl Overlaying<Products> for Overlay {
 
     fn ask(&mut self, ask: Ask) {
         Overlay::ask(self, ask)
+    }
+
+    fn asked(&self) -> bool {
+        self.ask.is_some()
     }
 
     fn stepped(&mut self) {
@@ -1633,11 +1650,12 @@ mod tests {
     #[test]
     fn a_step_never_waits_for_the_overlay_and_a_whole_settle_waits_for_the_ask_it_posted() {
         for answered in [false, true] {
-            assert!(!joins_on(false, answered, false), "a step waits for nothing: answered {answered}");
+            assert!(!joins_on(false, answered, false, || true), "a step waits for nothing: answered {answered}");
         }
-        assert!(joins_on(true, false, false), "a whole settle waits for the answer to the ask it posted");
-        assert!(!joins_on(true, true, false), "answered: the layout this ask made is in");
-        assert!(!joins_on(true, false, true), "the wait ran out");
+        assert!(joins_on(true, false, false, || true), "a whole settle waits for the answer to the ask it posted");
+        assert!(!joins_on(true, true, false, || true), "answered: the layout this ask made is in");
+        assert!(!joins_on(true, false, true, || true), "the wait ran out");
+        assert!(!joins_on(true, false, false, || false), "the map must publish the newly declared rows before joining");
     }
 
     use viewer_runtime::unit_handle::Unit;

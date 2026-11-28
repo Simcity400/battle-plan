@@ -76,6 +76,10 @@ impl Paint for Painter {
         None
     }
 
+    fn row_tables(&self, mode: Stock) -> Vec<TableId> {
+        mode.tables().to_vec()
+    }
+
     fn paint(&self, frame: &DecodedFrame, _choice: &Choice, mode: &MapMode, _selected: Option<u32>) -> io::Result<Fill> {
         self.gate.pass()?;
         for table in &self.reads {
@@ -91,7 +95,7 @@ fn record() -> Units {
     static RECORDED: AtomicUsize = AtomicUsize::new(0);
     let name = format!("mode fills test {}", RECORDED.fetch_add(1, Ordering::Relaxed));
     let mut tables: Vec<TableId> = TABLES.to_vec();
-    tables.push(TableId::Clock);
+    tables.extend([TableId::Clock, TableId::StateResources]);
     let pages = viewer_layer_core::test_support::rail_recording::recorded(40, |_| Vec::new(), |at, store: &mut Store| {
         if at == 0 {
             store.table(TableId::Clock.index()).unwrap().insert_at(0, 0).unwrap();
@@ -152,7 +156,7 @@ fn a_mode_fill_shows_its_own_modes_picture_from_its_first_product_and_nothing_at
     let mut side = side_of(record(), Painter { reads: vec![TableId::Subjects], gate: Arc::clone(&gate) }, air.clone());
 
     assert!(side.parts().unwrap().0.get(TableId::Clock).is_some(), "at another mode it declares the Clock");
-    until(&mut side, "the worker's first build", |_, _| gate.reached());
+    until(&mut side, "the worker's first build", |side, _| !side.composing() && gate.reached());
     assert_eq!(fills(&side).published(), Published::Nothing, "before its first picture it has published nothing");
     assert!(fills(&side).product().is_none());
     assert_eq!(fills(&side).carried().entities, 0, "the worker's build is not the frame thread's work");
@@ -160,10 +164,9 @@ fn a_mode_fill_shows_its_own_modes_picture_from_its_first_product_and_nothing_at
 
     gate.open();
     let hour = side.applied().expect("the head has reached an hour");
-    side.frame(hour).unwrap();
-    let built = fills(&side).rebuilt().wait(hour, LIMIT).unwrap();
-    assert_eq!(built.product.as_ref().map(|fill| fill.mode.clone()).ok(), Some(air.map_mode.clone()), "built for the view's mode: {:?}", built.product.as_ref().err());
     side.settle_all().unwrap();
+    let built = fills(&side).product().unwrap();
+    assert_eq!(built.product.as_ref().map(|fill| fill.mode.clone()).ok(), Some(air.map_mode.clone()), "built for the view's mode: {:?}", built.product.as_ref().err());
     assert_eq!(fills(&side).published(), Published::Current, "once built it stands at the hour applied: its picture is the hour's");
     assert_eq!(shown_mode(&side), Some(air.map_mode.clone()));
     let tables = fills(&side).rebuilt().tables();
@@ -172,15 +175,12 @@ fn a_mode_fill_shows_its_own_modes_picture_from_its_first_product_and_nothing_at
 
     let resources = view(Stock::Resources);
     side.set_view(resources.clone()).unwrap();
-    assert!(fills(&side).product().is_none(), "the old mode's picture is let go with the change");
-    assert_eq!(fills(&side).published(), Published::Nothing);
-    let deadline = Instant::now() + LIMIT;
-    while shown_mode(&side).is_none() {
-        assert!(Instant::now() < deadline, "no picture of the new mode within 120 s");
-        side.frame(hour).unwrap();
-        std::thread::yield_now();
-    }
-    assert_eq!(shown_mode(&side), Some(resources.map_mode), "the first picture after the change is the new mode's, never the old one's");
+    assert!(fills(&side).rebuilt().tables().contains(&TableId::StateResources), "the new mode declares its rows before asking its worker");
+    assert_eq!(shown_mode(&side), Some(air.map_mode.clone()), "the preceding picture holds during the change");
+    assert!(!fills(&side).mode_ready());
+    side.settle_all().unwrap();
+    assert_eq!(shown_mode(&side), Some(resources.map_mode), "the new picture replaces the preceding one");
+    assert!(fills(&side).mode_ready());
 
     side.set_view(View::default()).unwrap();
     side.frame(hour).unwrap();
@@ -194,7 +194,7 @@ fn a_mode_fill_shows_its_own_modes_picture_from_its_first_product_and_nothing_at
     gate.open();
     let units = viewer_layer_core::test_support::recorded::without(record(), TableId::Factions);
     let mut side = side_of(units, Painter { reads: vec![TableId::Factions], gate }, air);
-    until(&mut side, "the refused picture taken", |side, _| fills(side).product().is_some());
+    until(&mut side, "the refused picture taken", |side, _| !side.composing() && fills(side).product().is_some());
     let why = fills(&side).refusal().map(str::to_owned).unwrap_or_else(|| {
         let taken = fills(&side).product().map(|built| (built.hour, built.product.as_ref().map(|fill| fill.mode.token()).map_err(Clone::clone)));
         panic!(

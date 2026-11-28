@@ -784,10 +784,7 @@ fn names_at_a_mode_that_writes_none_declare_and_hold_nothing() {
     let mut side = windowed("names-none");
     settled_steps(&mut side, |_, hour| hour >= 8);
     side.set_view(view(Stock::Terrain)).unwrap();
-    for _ in 0..4 {
-        let applied = side.applied().unwrap();
-        side.frame(applied).unwrap();
-    }
+    side.catch_up(side.applied().unwrap()).unwrap();
     assert_eq!(side.refusals().count(), 0, "drawn, writing nothing; not refused");
     assert_eq!(names(&side).held(), 0, "it holds nothing");
     assert!(names(&side).shown().country.is_empty() && names(&side).areas().is_empty(), "it hands the window no name");

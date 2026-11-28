@@ -159,6 +159,7 @@ pub struct Reader(u64);
 #[derive(Clone)]
 struct Declaration {
     tables: Vec<Declared>,
+    projections: BTreeMap<usize, Vec<usize>>,
     since: Vec<u64>,
     rebuild: Option<Rebuild>,
     states: PendingStates,
@@ -996,6 +997,10 @@ pub struct Consumer {
 }
 
 impl Consumer {
+    pub fn set_blocking(&mut self, blocking: bool) -> bool {
+        std::mem::replace(&mut self.blocking, blocking)
+    }
+
     fn lock_ring(&self) -> Option<MutexGuard<'_, Ring>> {
         if self.blocking {
             return Some(lock(&self.shared.ring));
@@ -1079,7 +1084,11 @@ impl Consumer {
     }
 
     pub fn reaches(&self, head: Hour) -> Option<bool> {
-        try_lock(&self.shared.ring).map(|ring| ring.reaches(self.id, head))
+        self.lock_ring().map(|ring| ring.reaches(self.id, head))
+    }
+
+    pub fn next_hour(&self) -> Option<Hour> {
+        lock(&self.shared.ring).next_hour(self.id)
     }
 
     pub fn land(&mut self) {
@@ -1107,10 +1116,6 @@ impl Consumer {
 
 #[cfg(any(test, feature = "test-support"))]
 impl Consumer {
-    pub fn set_blocking(&mut self, blocking: bool) -> bool {
-        std::mem::replace(&mut self.blocking, blocking)
-    }
-
     pub fn take_blocking(&mut self, head: Hour, out: &mut Vec<Arc<Step>>) -> usize {
         let ring = lock(&self.shared.ring);
         self.take_from(ring, head, out)
@@ -1271,6 +1276,10 @@ impl Playhead {
     }
 
     pub fn declare(&self, tables: Vec<Declared>, rebuild: Option<Rebuild>) -> io::Result<Reader> {
+        self.declare_projected(tables, rebuild, BTreeMap::new())
+    }
+
+    pub fn declare_projected(&self, tables: Vec<Declared>, rebuild: Option<Rebuild>, projections: BTreeMap<usize, Vec<usize>>) -> io::Result<Reader> {
         self.check(&tables)?;
         let mut id = 0;
         self.shared.nudge(|control| {
@@ -1279,7 +1288,7 @@ impl Playhead {
             control.selection += 1;
             control.caught_up_at = None;
             let since = vec![control.selection; tables.len()];
-            control.readers.insert(Reader(id), Declaration { tables, since, rebuild, states: PendingStates::default() });
+            control.readers.insert(Reader(id), Declaration { tables, projections, since, rebuild, states: PendingStates::default() });
         });
         self.shared.notify_control();
         Ok(Reader(id))
@@ -1290,10 +1299,14 @@ impl Playhead {
     }
 
     pub fn redeclare_seeding(&self, reader: Reader, tables: Vec<Declared>, seed_paused: bool) -> io::Result<()> {
+        self.redeclare_projected(reader, tables, BTreeMap::new(), seed_paused)
+    }
+
+    pub fn redeclare_projected(&self, reader: Reader, tables: Vec<Declared>, projections: BTreeMap<usize, Vec<usize>>, seed_paused: bool) -> io::Result<()> {
         if self.shared.leads() {
             let clock = seed_paused.then(|| lock_clock(&self.shared.clock));
             let mut control = lock(&self.shared.control);
-            if control.readers.get(&reader).is_some_and(|held| held.tables == tables) {
+            if control.readers.get(&reader).is_some_and(|held| held.tables == tables && held.projections == projections) {
                 control.hook_requested = true;
                 if clock.as_ref().is_some_and(|clock| !clock.playing()) {
                     control.seed_paused = true;
@@ -1312,8 +1325,13 @@ impl Playhead {
         self.shared.nudge(|control| {
             let stamp = control.selection + 1;
             if let Some(held) = control.readers.get_mut(&reader) {
-                held.since = tables.iter().map(|declared| held.tables.iter().position(|before| before == declared).map_or(stamp, |at| held.since[at])).collect();
-                held.tables = tables;
+                held.since = tables.iter().map(|declared| {
+                    if held.projections.get(&declared.table) != projections.get(&declared.table) {
+                        return stamp;
+                    }
+                    held.tables.iter().position(|before| before == declared).map_or(stamp, |at| held.since[at])
+                }).collect();
+                (held.tables, held.projections) = (tables, projections);
                 control.selection = stamp;
                 control.caught_up_at = None;
                 if clock.as_ref().is_some_and(|clock| !clock.playing()) {
@@ -4114,7 +4132,7 @@ fn union(readers: Vec<(Reader, Declaration)>) -> BTreeMap<usize, Selected> {
             entry.keyed |= held.keyed;
             entry.passing |= held.passing;
             entry.hourly |= held.hourly;
-            let mut columns = held.columns;
+            let mut columns = declaration.projections.get(&held.table).cloned().unwrap_or(held.columns);
             columns.sort_unstable();
             columns.dedup();
             entry.readings.push(Reading { reader, columns, keyed: held.keyed, passing: held.passing, since, rebuild: declaration.rebuild.clone() });

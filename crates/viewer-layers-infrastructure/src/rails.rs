@@ -837,7 +837,9 @@ impl Layer for Rails {
 
     fn compose(&mut self, mirrors: &Mirrors) -> io::Result<()> {
         let marked = self.marked;
-        self.held = None;
+        if self.shown {
+            self.held = None;
+        }
         self.settle_dirty(mirrors)?;
         self.marked = marked;
         Ok(())

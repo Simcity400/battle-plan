@@ -10,7 +10,7 @@ use replay_data::{rows::TableId, scope::CaptureMode};
 use std::sync::Arc;
 
 #[test]
-fn the_detail_report_reads_every_tables_status_at_the_head_and_its_rows_from_the_maps_mirrors() {
+fn the_detail_report_reads_every_tables_status_and_counts_rows_even_when_the_map_does_not_need_them() {
     let entry = open(record("details", 8), hourly_steps()).unwrap();
     entry.set_capture(CaptureMode::Full);
     let (layer, _) = Reads::new(&[TableId::Countries]);
@@ -29,7 +29,8 @@ fn the_detail_report_reads_every_tables_status_at_the_head_and_its_rows_from_the
         assert_eq!(lines.len(), TableId::ALL.len() + 2, "every table, the head and the capture time");
         assert_eq!(lines[0], format!("At the playback head: hour {hour}"));
         assert_eq!(line(&lines, TableId::Countries), countries, "hour {hour}");
-        assert_eq!(line(&lines, TableId::LandCombats), "LandCombats: 2 rows", "every table is held for the view store's readers, so one no layer reads gives its rows");
+        assert_eq!(line(&lines, TableId::LandCombats), "LandCombats: 2 rows", "a table no layer reads still gives its row count");
+        assert!(side.parts().unwrap().0.get(TableId::LandCombats).is_none(), "reporting its count does not keep a mirror");
         assert_eq!(lines.last().map(String::as_str), Some("Capture time: not recorded in the playhead's units"), "missing, never zero");
         for (line, table) in lines[1..lines.len() - 1].iter().zip(TableId::ALL) {
             assert!(line.starts_with(&format!("{table:?}: ")), "{line}");

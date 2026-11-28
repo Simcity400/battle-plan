@@ -1,6 +1,6 @@
 
 use viewer_layer_core::layers::{Carried, Settling, Dirty, Inputs, Layer, List, Num, Published, Retirement, Text, Upstream, View};
-use viewer_layer_core::playhead_host::{Entry, mirror::{Cell, Mirror, Mirrors}, views::{Need, Recording, self}};
+use viewer_layer_core::playhead_host::{Entry, mirror::{Cell, Mirror, Mirrors}, views::{Recording, self}};
 use playhead::Step;
 use replay_columnar::manifest::Status;
 use viewer_layer_core::playhead_host::timeline::{self, Mark};
@@ -56,7 +56,7 @@ struct Columns {
     task_force: Num<u64>,
     class_id: Num<i32>,
     model: [usize; 6],
-    explicit_entity: Text,
+    explicit_entity: usize,
     tag: Text,
     link_slot: Num<u32>,
     speed: Num<i32>,
@@ -79,7 +79,7 @@ struct Asked {
     stop: bool,
     head: Option<Hour>,
     seek: Option<u64>,
-    views: Option<views::Reader>,
+    views: Option<Arc<views::Reader>>,
     wanted: Vec<(u64, Hour)>,
     known: Vec<u64>,
     decided: Decided,
@@ -98,6 +98,16 @@ struct Asked {
     looks: u64,
 }
 
+impl Asked {
+    fn rows_at(&self, hour: Hour) -> bool {
+        self.refused.as_ref().is_some() || self.views.as_ref().is_some_and(|reader| reader.has_rows_at(hour))
+    }
+
+    fn made_at(&self, hour: Hour) -> bool {
+        !self.open || (self.rows_at(hour) && self.wanted.is_empty() && self.building.is_empty() && self.answered.as_ref() == Some(&hour))
+    }
+}
+
 struct Shared {
     asked: Mutex<Asked>,
     wake: Condvar,
@@ -113,6 +123,15 @@ impl Shared {
         self.lock().stop = true;
         self.answered.notify_all();
         self.wake.notify_all();
+    }
+
+    fn published(&self, asked: &mut Asked, maker: timeline::Maker) {
+        asked.answered_at = Some(Instant::now());
+        timeline::mark(maker, Mark::Published);
+        if let Some(reader) = &asked.views {
+            reader.notify_progress();
+        }
+        self.answered.notify_all();
     }
 }
 
@@ -234,16 +253,20 @@ impl Rosters {
             if let Some(error) = asked.error.as_ref() {
                 return Err(io::Error::other(format!("The ship rosters' worker stopped: {error}")));
             }
-            if asked.wanted.is_empty() && asked.answered.as_ref() == Some(&hour) {
+            if asked.made_at(hour) {
                 waited_for(began, asked.answered_at, slices, timeouts, true);
                 return Ok(());
+            }
+            if !asked.rows_at(hour) {
+                waited_for(began, asked.answered_at, slices, timeouts, false);
+                return Err(io::Error::new(io::ErrorKind::WouldBlock, format!("The ship rosters await {:?} at hour {hour}", asked.tables)));
             }
             let now = Instant::now();
             if now >= until {
                 waited_for(began, asked.answered_at, slices, timeouts, false);
                 return Err(io::Error::other(format!("The ship rosters were not answered at hour {hour} in {limit:?} (rows at {:?}, {} asked, loading {})", asked.answered.as_ref(), asked.wanted.len(), asked.loading)));
             }
-            let (held, ended) = self.shared.answered.wait_timeout(asked, (until - now).min(Duration::from_millis(50))).unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (held, ended) = self.shared.answered.wait_timeout(asked, until - now).unwrap_or_else(std::sync::PoisonError::into_inner);
             asked = held;
             slices += 1;
             timeouts += u64::from(ended.timed_out());
@@ -304,7 +327,7 @@ fn waited_for(began: Instant, answered_at: Option<Instant>, slices: u64, timeout
 }
 
 fn resolve(shared: &Shared, naval: &dyn Naval, maker: timeline::Maker) {
-    let mut reader: Option<views::Reader> = None;
+    let mut reader: Option<Arc<views::Reader>> = None;
     let mut last: Option<Arc<DecodedFrame>> = None;
     loop {
         let mut asked = shared.lock();
@@ -314,7 +337,6 @@ fn resolve(shared: &Shared, naval: &dyn Naval, maker: timeline::Maker) {
         if !asked.open {
             if let Some(held) = reader.take() {
                 held.declare_only(&[]);
-                asked.views = Some(held);
                 asked.let_go = true;
                 shared.answered.notify_all();
             }
@@ -327,7 +349,6 @@ fn resolve(shared: &Shared, naval: &dyn Naval, maker: timeline::Maker) {
         if let Some(why) = asked.refused.as_ref().cloned() {
             if let Some(held) = reader.take() {
                 held.declare_only(&[]);
-                asked.views = Some(held);
                 asked.let_go = true;
             }
             asked.loading = false;
@@ -336,9 +357,7 @@ fn resolve(shared: &Shared, naval: &dyn Naval, maker: timeline::Maker) {
             asked.answers.extend_nonempty(forces.into_iter().map(|(force, _)| (force, Arc::new(Some(Err(why.clone()))))));
             if let Some(head) = asked.head.filter(|&head| refused || asked.answered.as_ref() != Some(&head)) {
                 asked.answered.set_if_changed(Some(head));
-                asked.answered_at = Some(Instant::now());
-                timeline::mark(maker, Mark::Published);
-                shared.answered.notify_all();
+                shared.published(&mut asked, maker);
             }
             if !std::mem::take(&mut asked.woken) {
                 let _ = shared.wake.wait_timeout(asked, Duration::from_millis(17));
@@ -346,16 +365,24 @@ fn resolve(shared: &Shared, naval: &dyn Naval, maker: timeline::Maker) {
             continue;
         }
         if reader.is_none() {
-            reader = asked.views.take();
+            reader = asked.views.clone();
             if let Some(reader) = &reader {
                 asked.let_go = false;
                 reader.declare_only(&asked.tables);
             }
         }
-        let frame = reader.as_ref().and_then(views::Reader::frame).filter(|frame| viewer_layer_core::rebuilt::holds(frame, &asked.tables));
-        asked.loading = reader.is_some() && frame.is_none();
+        let before = reader.as_ref().map(|reader| reader.published());
+        let frame = reader.as_ref().and_then(|reader| reader.frame()).filter(|frame| viewer_layer_core::rebuilt::holds(frame, &asked.tables));
+        let loading = reader.is_some() && frame.is_none();
+        if loading && !asked.loading {
+            shared.answered.notify_all();
+        }
+        asked.loading = loading;
         let Some(frame) = frame else {
-            if !std::mem::take(&mut asked.woken) {
+            if let (Some(reader), Some(before)) = (&reader, before) {
+                drop(asked);
+                reader.wait_newer(before, Duration::from_millis(17));
+            } else if !std::mem::take(&mut asked.woken) {
                 let _ = shared.wake.wait_timeout(asked, Duration::from_millis(17));
             }
             continue;
@@ -397,19 +424,15 @@ fn resolve(shared: &Shared, naval: &dyn Naval, maker: timeline::Maker) {
         if forces.is_empty() {
             if newer {
                 asked.answered.set_if_changed(Some(frame.hour));
-                asked.answered_at = Some(Instant::now());
                 last = Some(frame);
-                timeline::mark(maker, Mark::Published);
-                shared.answered.notify_all();
+                shared.published(&mut asked, maker);
             } else if let Some(stands) = reader.as_ref().and_then(|reader| reader.through(Arc::as_ptr(&frame)))
                 && asked.answered.as_ref().is_some_and(|&answered| answered < stands)
             {
                 asked.answered.advance(stands);
-                asked.answered_at = Some(Instant::now());
-                timeline::mark(maker, Mark::Published);
-                shared.answered.notify_all();
+                shared.published(&mut asked, maker);
             }
-            let seen = reader.as_ref().map_or(0, views::Reader::published);
+            let seen = reader.as_ref().map_or(0, |reader| reader.published());
             let woken = std::mem::take(&mut asked.woken);
             match (woken, reader.as_ref()) {
                 (true, _) => drop(asked),
@@ -454,6 +477,8 @@ fn resolve(shared: &Shared, naval: &dyn Naval, maker: timeline::Maker) {
             asked.tables.dedup();
             if let Some(reader) = &reader {
                 reader.declare_only(&asked.tables);
+                asked.loading = true;
+                shared.answered.notify_all();
             }
             last = None;
             continue;
@@ -474,11 +499,8 @@ fn resolve(shared: &Shared, naval: &dyn Naval, maker: timeline::Maker) {
         asked.known.dedup();
         asked.answers.extend_nonempty(answers);
         asked.answered.set_if_changed(Some(frame.hour));
-        asked.answered_at = Some(Instant::now());
+        shared.published(&mut asked, maker);
         last = Some(frame);
-        drop(asked);
-        timeline::mark(maker, Mark::Published);
-        shared.answered.notify_all();
     }
 }
 
@@ -692,11 +714,10 @@ impl Ships {
     }
 
     pub fn set_views(&self, store: &views::Store) {
-        let needs: Vec<Need> = ROSTER_TABLES.iter().map(|&table| Need::every(table)).collect();
-        let reader = store.reader("ship_rosters", &needs);
+        store.use_columns(TableId::VariantDefinitions);
+        let reader = store.reader("ship_rosters", &[]);
         let mut asked = self.rosters.shared.lock();
-        reader.declare_only(&asked.tables);
-        asked.views = Some(reader);
+        asked.views = Some(Arc::new(reader));
         asked.woken = true;
         drop(asked);
         self.rosters.shared.wake.notify_all();
@@ -1228,7 +1249,7 @@ impl Layer for Ships {
         if self.window {
             inputs.after("vision");
         }
-        for table in [TableId::TaskForces, TableId::TaskForceMapMotion, TableId::TaskForceCounterInputs, TableId::TaskForceMissions, TableId::ProvinceUnitOrder, TableId::Ships, TableId::ShipModels, TableId::VariantDefinitions, TableId::Countries, TableId::CountryLinks, TableId::Clock] {
+        for table in [TableId::TaskForces, TableId::TaskForceMapMotion, TableId::TaskForceCounterInputs, TableId::TaskForceMissions, TableId::ProvinceUnitOrder, TableId::Ships, TableId::ShipModels, TableId::Countries, TableId::CountryLinks, TableId::Clock] {
             inputs.table(table, true)?;
         }
         let model = ["variant", "hull_sprite", "fallback_sprite", "model_number", "formation_flags", "counter"];
@@ -1258,7 +1279,7 @@ impl Layer for Ships {
             task_force: inputs.number(TableId::Ships, "task_force")?,
             class_id: inputs.number(TableId::Ships, "class_id")?,
             model: columns,
-            explicit_entity: inputs.text(TableId::VariantDefinitions, "explicit_entity")?,
+            explicit_entity: inputs.watch(TableId::VariantDefinitions, "explicit_entity")?,
             tag: inputs.text(TableId::Countries, "tag")?,
             link_slot: inputs.number(TableId::CountryLinks, "canonical_slot")?,
             speed: inputs.number(TableId::Clock, "speed")?,
@@ -1377,7 +1398,7 @@ impl Layer for Ships {
                         }
                     }
                 }
-                TableId::VariantDefinitions if any(&[columns.explicit_entity.column]) => self.rosters_dirty = true,
+                TableId::VariantDefinitions if any(&[columns.explicit_entity]) => self.rosters_dirty = true,
                 TableId::Countries if any(&[columns.tag.column]) => self.rosters_dirty = true,
                 TableId::CountryLinks if any(&[columns.link_slot.column]) => self.rosters_dirty = true,
                 TableId::Clock if any(&[columns.speed.column]) => self.all_dirty = true,
@@ -1414,6 +1435,11 @@ impl Layer for Ships {
             (Some(stands), Some(head)) if stands < head => Published::Cadence(stands),
             _ => Published::Current,
         }
+    }
+
+    fn made_at(&self, hour: Hour) -> bool {
+        !self.window || self.columns.is_none() || self.refused.as_deref().is_some_and(|why| why != "composing")
+            || (self.product_hour == Some(hour) && self.waiting() == 0 && self.rosters.shared.lock().made_at(hour))
     }
 
     fn held(&self) -> usize {

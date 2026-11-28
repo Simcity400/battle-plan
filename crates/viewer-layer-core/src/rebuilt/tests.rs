@@ -429,6 +429,33 @@ fn an_exact_layer_is_the_product_of_the_hour_each_step_applies() {
 }
 
 #[test]
+fn a_layer_finishing_its_product_wakes_the_waiting_whole_picture() {
+    let gate = Gate::shut();
+    let mut side = window_side_with(record(), &gate, true);
+    let _opens = Opens(Arc::clone(&gate));
+    side.entry().playhead().pause();
+    let hour = side.applied().unwrap();
+    side.frame(hour).unwrap();
+    gate.wait_reached();
+    let probe = side.layers_mut()[1].any_mut().unwrap().downcast_mut::<Whole<Probe>>().unwrap();
+    probe.behind = true;
+    let (waiting, wait) = std::sync::mpsc::channel();
+    side.before_whole_wait = Some(Box::new(move || waiting.send(()).unwrap()));
+    std::thread::scope(|scope| {
+        let gate = Arc::clone(&gate);
+        scope.spawn(move || {
+            let began = wait.recv();
+            gate.open();
+            began.unwrap();
+        });
+        let result = side.catch_up(hour);
+        side.before_whole_wait = None;
+        result.unwrap();
+    });
+    assert_eq!(probe_of(&side).product().unwrap().product.as_ref().ok(), Some(&hour));
+}
+
+#[test]
 fn a_compose_lets_the_product_built_before_it_go() {
     let gate = Gate::opened();
     let mut side = window_side_with(record(), &gate, true);

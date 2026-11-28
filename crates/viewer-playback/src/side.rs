@@ -726,6 +726,7 @@ pub struct Products {
     pub snow: Option<Landed<map_display_data::Summary>>,
     pub music: Option<Landed<Arc<viewer_audio::Chances>>>,
     pub lines: Option<Lines>,
+    warning_facts: crate::limitations::FactsCache,
     pub overlay: Option<Landed<overlay::Made>>,
     overlay_withdrawn: bool,
     pub overlay_refused: bool,
@@ -776,6 +777,7 @@ impl Default for Products {
             snow: None,
             music: None,
             lines: None,
+            warning_facts: Default::default(),
             overlay: None,
             overlay_withdrawn: false,
             overlay_refused: false,
@@ -904,7 +906,7 @@ impl Products {
         self.snow = drawn::<viewer_layers_infrastructure::snow::Snow>(side, "snow").and_then(viewer_layers_infrastructure::snow::Snow::landed_summary);
         self.music = viewer_layers_political::scripts::music(side);
         self.lines = wants.warnings.then(|| {
-            let [limitations, reports] = crate::presentation::map_lines(side);
+            let [limitations, reports] = crate::presentation::cached_map_lines(side, &mut self.warning_facts);
             Lines { political: viewer_layers_political::political_lines::political_lines(side), limitations, reports }
         });
     }

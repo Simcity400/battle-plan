@@ -147,6 +147,7 @@ impl Open {
         let reader = views.reader_at(NAME, needs, Pace::Ready);
         let (jobs, receive) = mpsc::channel::<Work>();
         let (send, done) = landed::channel();
+        let progress = views.progress_notifier();
         std::thread::Builder::new().name(NAME.into()).spawn(move || {
             viewer_runtime::worker_priority::enter(viewer_runtime::worker_priority::Class::Kept);
             let mut evaluating = Evaluating::default();
@@ -180,6 +181,7 @@ impl Open {
                 if send.send(Done { product, missed, ns, epoch }).is_err() {
                     return;
                 }
+                progress();
             }
         })?;
         Ok(Self { reader, jobs, done, busy: false, seen: None, handed: false, handed_whole: false, evaluating: None })
@@ -397,7 +399,19 @@ fn blocking_catch_up(_scripts: &Scripts) -> bool {
 
 impl Scripts {
     pub fn new(held: Held) -> Self {
-        Self::with(held, PRIMED.get().cloned().unwrap_or_default())
+        use replay_data::rows::{BuildingRow, CountryBuildingResourceRow, DivisionEquipmentRow, ProjectRow, StateBaseResourceRow, mask};
+        let mut needs = PRIMED.get().cloned().unwrap_or_default();
+        joined(&mut needs, [
+            (TableId::StateBuildings, mask::<BuildingRow>(&["level", "healthy_level"])),
+            (TableId::StateBaseResources, mask::<StateBaseResourceRow>(&["amount"])),
+            (TableId::CountryBuildingResources, mask::<CountryBuildingResourceRow>(&["building", "count", "resource", "amount"])),
+            (TableId::DivisionEquipment, mask::<DivisionEquipmentRow>(&["variant_handle", "amount_raw"])),
+            (TableId::WingEquipment, u64::MAX),
+            (TableId::Projects, mask::<ProjectRow>(&["definition_id", "completed"])),
+            (TableId::Nukes, u64::MAX),
+            (TableId::RaidCooldowns, u64::MAX),
+        ]);
+        Self::with(held, needs)
     }
 
     pub fn with(content: Held, mut needs: Vec<Need>) -> Self {
@@ -668,6 +682,7 @@ impl Layer for Scripts {
             drop(self.close());
             return Ok(());
         }
+        self.ensure_open();
         inputs.table(TableId::Countries, true)
     }
 

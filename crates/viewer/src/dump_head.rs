@@ -71,9 +71,10 @@ pub(crate) fn at(entry: Arc<Entry>, layers: Vec<Box<dyn Layer>>, hour: Hour, bra
     if !(timeline.first()..=timeline.last()).contains(&hour) {
         return Err(io::Error::other(format!("hour {hour} is outside the playhead's units ({} to {})", timeline.first(), timeline.last())));
     }
-    let mut side = MapSide::with_products(Arc::clone(&entry), layers, View::default())?;
+    let (mut side, reader) = MapSide::with_readers(entry, layers, View::default(), |store| {
+        store.handle().reader_at("dump", &tables.iter().copied().map(Need::every).collect::<Vec<Need>>(), Pace::Step)
+    })?;
     side.set_branch(branch);
-    let reader = side.views().handle().reader_at("dump", &tables.iter().copied().map(Need::every).collect::<Vec<Need>>(), Pace::Step);
     if let Some((name, why)) = side.refusals().next() {
         return Err(io::Error::other(format!("The {name} layer is refused: {why}")));
     }

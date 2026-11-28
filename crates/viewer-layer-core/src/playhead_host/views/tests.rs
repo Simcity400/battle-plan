@@ -668,10 +668,23 @@ fn a_table_learned_while_a_stepped_frame_holds_the_head_reads_at_that_head() {
     until(&mut side, 6);
     entry.playhead().play(0.0);
     let held = side.applied().expect("the side applied an hour");
+    let (mirrors, _) = side.parts().unwrap();
+    assert!(mirrors.get(LEARNED).is_none(), "an undeclared table has no mirror");
+    assert!(!mirrors.get(DRAWN).unwrap().holds(1), "an undeclared column has no mirror");
     side.layers_mut()[0].any_mut().and_then(|layer| layer.downcast_mut::<Maker>()).expect("the maker").learn = true;
-    let (hour, rows) = until_learned(&mut side, Some(held), "while a stepped frame held the head");
+    side.catch_up(held).unwrap();
+    let (hour, rows) = learned_at(&side).expect("the whole settle delivered the late table");
     assert!(rows > 0, "the rows of {LEARNED:?} it learned");
     assert_eq!(hour, held, "it reads {LEARNED:?} at the hour the stepped frame holds, never at a newer one");
+
+    let view = side.views().handle();
+    let deferred = view.reader_later("brief late view", &[Need::every(LEARNED)], Pace::Step);
+    maker(&side).reader.as_ref().unwrap().declare_only(&[MADE]);
+    side.catch_up(held).unwrap();
+    assert!(deferred.frame_of(held).is_some());
+    drop(deferred);
+    side.catch_up(held).unwrap();
+    assert!(side.parts().unwrap().0.get(LEARNED).is_none(), "closing the final reader releases the mirror");
 }
 
 #[test]

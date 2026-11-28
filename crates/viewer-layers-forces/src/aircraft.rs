@@ -136,6 +136,10 @@ impl Flights {
 impl Build for Flights {
     type Product = Flown;
 
+    fn exact_columns(&self) -> &[TableId] {
+        &[TableId::VariantDefinitions]
+    }
+
     fn hourly(&self) -> bool {
         true
     }

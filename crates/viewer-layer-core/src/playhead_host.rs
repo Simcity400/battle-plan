@@ -415,7 +415,7 @@ struct Worker {
 }
 
 impl Worker {
-    fn new() -> io::Result<Self> {
+    fn new(notify_progress: Arc<dyn Fn() + Send + Sync>) -> io::Result<Self> {
         let (jobs, receive) = mpsc::channel::<Job>();
         let (send, done) = viewer_runtime::landed::channel();
         std::thread::Builder::new().name("playhead host worker".into()).spawn(move || {
@@ -427,6 +427,7 @@ impl Worker {
                         if send.send(away).is_err() {
                             return;
                         }
+                        notify_progress();
                     }
                     Job::Drop(held) => drop(held),
                 }
@@ -642,6 +643,7 @@ fn counters_at(names: &[&'static str]) -> Option<usize> {
 
 pub trait Overlaying<P: PlaybackProducts>: Send {
     fn ask(&mut self, ask: P::OverlayAsk);
+    fn asked(&self) -> bool { true }
     fn ask_step(&mut self, side: OverlayStep<'_>, whole: bool, lay: bool, moved: Arc<viewer_unit_reads::counter_move::MovedHours>) -> bool;
     fn join(&mut self, layers: &[Box<dyn Layer>], perspective: &viewer_foundation::perspective::Choice, branch: Option<replay_data::BranchId>, settling: Settling) -> bool;
     fn stepped(&mut self);
@@ -738,9 +740,12 @@ pub struct MapSide<P: PlaybackProducts = NoProducts> {
     views: views::Store,
     declared_layers: BTreeMap<usize, Read>,
     layers_awake: Vec<bool>,
-    for_the_makers: BTreeMap<usize, Read>,
     layers: Vec<Box<dyn Layer>>,
     worker: Worker,
+    progress: Option<(Receiver<()>, playhead::Watcher)>,
+    retired: Arc<AtomicBool>,
+    #[cfg(test)]
+    pub(crate) before_whole_wait: Option<Box<dyn FnOnce() + Send>>,
     composing: bool,
     pending: VecDeque<Arc<Step>>,
     taken: Vec<Arc<Step>>,
@@ -822,8 +827,28 @@ impl MapSide<NoProducts> {
 impl<P: PlaybackProducts> MapSide<P> {
     pub fn lay_overlay_again(&mut self) -> Result<viewer_runtime::landed::Landed<P::OverlayMade>, String> {
         let until = Instant::now() + HANDS_BACK;
-        while !self.ask_overlay_step(true, true, Arc::default()) {
-            if Instant::now() >= until {
+        let epoch = self.epoch;
+        loop {
+            let _ = self.whole_progress().try_recv();
+            self.continuing().map_err(|error| error.to_string())?;
+            if self.entry.playhead.epoch() != epoch {
+                return Err("The overlay request was superseded by a seek".into());
+            }
+            if let Some(error) = self.entry.playhead.error() {
+                return Err(format!("The playhead stopped: {error}"));
+            }
+            self.step_makers(false).map_err(|error| error.to_string())?;
+            if self.applied.is_some_and(|hour| !self.head_products_reached(hour)) {
+                self.settle_makers().map_err(|error| error.to_string())?;
+            }
+            let asked = self.ask_overlay_step(true, true, Arc::default());
+            self.post_makers();
+            let ready = |side: &Self| side.applied.is_some_and(|hour| side.whole_ready_at(hour));
+            if asked && ready(self) && self.join_overlay(Settling::Whole) && ready(self) {
+                break;
+            }
+            let local = self.applied.is_some_and(|hour| self.makers_can_step(hour));
+            if Instant::now() >= until || (!local && !self.wait_whole_progress(until).map_err(|error| error.to_string())?) {
                 let loading = self.overlay.as_deref().map(Overlaying::loading).unwrap_or_default().join("; ");
                 return Err(format!(
                     "the overlay's maker was not asked for hour {:?}: composing {}, superseded {}, branch {:?}, an overlay {}{}",
@@ -835,9 +860,7 @@ impl<P: PlaybackProducts> MapSide<P> {
                     if loading.is_empty() { String::new() } else { format!("; {loading}") },
                 ));
             }
-            std::thread::sleep(std::time::Duration::from_micros(200));
         }
-        self.join_overlay(Settling::Whole);
         let hour = self.applied;
         self.take_overlay().ok_or_else(|| {
             let overlay = self.overlay.as_deref().expect("asked above");
@@ -853,20 +876,30 @@ impl<P: PlaybackProducts> MapSide<P> {
         })
     }
 
-    pub fn with_products(entry: Arc<Entry>, mut layers: Vec<Box<dyn Layer>>, view: View) -> io::Result<Self> {
+    pub fn with_products(entry: Arc<Entry>, layers: Vec<Box<dyn Layer>>, view: View) -> io::Result<Self> {
+        Self::with_readers(entry, layers, view, |_| ()).map(|(side, ())| side)
+    }
+
+    pub fn with_readers<R>(entry: Arc<Entry>, mut layers: Vec<Box<dyn Layer>>, view: View, readers: impl FnOnce(&views::Store) -> R) -> io::Result<(Self, R)> {
         let names: Vec<_> = layers.iter().map(|layer| layer.name()).collect();
         let counter_at = counters_at(&names);
-        let views = views::Store::for_map(&entry);
+        let views = views::Store::new(&entry);
         for layer in &mut layers {
             layer.views(&views)?;
         }
+        let readers = readers(&views);
         let Declaring { union: declared, reads, upstream, each } = declare(&entry, &mut layers, &view);
         let placed = layers.iter_mut().map(|layer| layer.placed(&view)).collect();
         let declared_layers = declared;
-        let for_the_makers = for_the_makers(&entry);
-        let declared = merged(&declared_layers, &for_the_makers);
-        let reader = entry.playhead.declare(to_declared(&declared), Some(mirror::rebuild_map(Arc::clone(&entry.pages))))?;
+        let demand = views.demand();
+        views.accept_asks();
+        let declared = merged(&declared_layers, views.declarations());
+        let (tables, projections) = to_declared(&declared);
+        let reader = entry.playhead.declare_projected(tables, Some(mirror::rebuild(Arc::clone(&entry.pages))), projections)?;
         let consumer = entry.playhead.consumer(reader);
+        let progress = views.handle().progress_notifier();
+        let worker = Worker::new(Arc::clone(&progress))?;
+        let vision = shown_vision::ShownVision::with_progress(progress);
         let reads_len = reads.len();
         let timed = layers.iter().any(|layer| layer.timed());
         if timed {
@@ -878,7 +911,7 @@ impl<P: PlaybackProducts> MapSide<P> {
             }
         }
         entry.maps.fetch_add(1, Ordering::AcqRel);
-        Ok(Self {
+        let side = Self {
             entry,
             reader,
             consumer,
@@ -896,9 +929,12 @@ impl<P: PlaybackProducts> MapSide<P> {
             views,
             layers_awake: awake_mask(&declared_layers),
             declared_layers,
-            for_the_makers,
             layers,
-            worker: Worker::new()?,
+            worker,
+            progress: None,
+            retired: Arc::default(),
+            #[cfg(test)]
+            before_whole_wait: None,
             composing: false,
             pending: VecDeque::new(),
             taken: Vec::new(),
@@ -926,14 +962,14 @@ impl<P: PlaybackProducts> MapSide<P> {
             settles_held: Arc::default(),
             sight: None,
             overlay: None,
-            vision: shown_vision::ShownVision::default(),
+            vision,
             combat: combat::Combat::default(),
             combat_whole: None,
             compose_ns: Vec::new(),
             epoch: 0,
             cancel: Arc::default(),
             superseded: false,
-            demand: 0,
+            demand,
             landed: 0,
             whole: false,
             fresh: Vec::new(),
@@ -946,7 +982,8 @@ impl<P: PlaybackProducts> MapSide<P> {
             waited: Waited::default(),
             doing: Arc::default(),
             composed: Arc::default(),
-        })
+        };
+        Ok((side, readers))
     }
 
     pub fn take_installs(&mut self) -> Vec<Box<dyn Installs>> {
@@ -1133,10 +1170,9 @@ impl<P: PlaybackProducts> MapSide<P> {
             self.switched = Some(Instant::now());
         }
         self.view = view;
-        for (at, read) in reads.iter().enumerate() {
-            if read.is_ok() && self.reads[at].is_err() {
-                self.ready[at] = false;
-                self.recompose[at] = true;
+        for (at, asked) in each.iter().enumerate() {
+            if asked.is_some() && *asked != self.declared_each[at] {
+                (self.ready[at], self.recompose[at]) = (false, true);
             }
         }
         self.reads = reads;
@@ -1151,22 +1187,21 @@ impl<P: PlaybackProducts> MapSide<P> {
                 }
             }
         }
-        let moved: BTreeSet<usize> = declared.iter().filter(|(table, read)| self.declared_layers.get(table) != Some(read)).map(|(&table, _)| table).chain(self.declared_layers.keys().filter(|table| !declared.contains_key(table)).copied()).collect();
         self.declared_layers = declared;
         self.layers_awake = awake_mask(&self.declared_layers);
-        self.remirror(&moved)
+        self.remirror()
     }
 
-    fn remirror(&mut self, moved: &BTreeSet<usize>) -> io::Result<()> {
-        for at in 0..self.reads.len() {
-            if self.reads[at].as_ref().is_ok_and(|tables| tables.iter().any(|table| moved.contains(table))) {
-                (self.ready[at], self.recompose[at]) = (false, true);
-            }
-        }
-        let declared = merged(&self.declared_layers, &self.for_the_makers);
+    fn remirror(&mut self) -> io::Result<()> {
+        let demand = self.views.demand();
+        self.views.accept_asks();
+        let declared = merged(&self.declared_layers, self.views.declarations());
         if declared == self.declared {
+            self.demand = demand;
             return Ok(());
         }
+        let (tables, projections) = to_declared(&declared);
+        self.entry.playhead.redeclare_projected(self.reader, tables, projections, false)?;
         self.views.settled();
         if let Some(mirrors) = self.mirrors.as_mut().and_then(Arc::get_mut) {
             for table in self.declared.keys().filter(|table| !declared.contains_key(table)) {
@@ -1175,14 +1210,9 @@ impl<P: PlaybackProducts> MapSide<P> {
                 }
             }
         }
-        let changed: BTreeSet<usize> = declared.iter().filter(|(table, read)| self.declared.get(table) != Some(read)).map(|(&table, _)| table).collect();
-        for (at, reads) in self.reads.iter().enumerate() {
-            if reads.as_ref().is_ok_and(|tables| tables.iter().any(|table| changed.contains(table))) {
-                self.ready[at] = false;
-            }
-        }
         self.declared = declared;
-        self.entry.playhead.redeclare(self.reader, to_declared(&self.declared))
+        self.demand = demand;
+        Ok(())
     }
 
     fn place(&mut self, view: &View) -> bool {
@@ -1255,7 +1285,7 @@ impl<P: PlaybackProducts> MapSide<P> {
 
     fn frame_step(&mut self, head: Hour, settling: crate::layers::Settling, lay: bool, wait_compose: bool) -> io::Result<Frame> {
         self.frame += 1;
-        (self.demand, self.landed) = (self.views.demand(), viewer_runtime::landed::count());
+        self.landed = viewer_runtime::landed::count();
         self.vision.take_made();
         let stepping = Instant::now();
         let doing = Arc::clone(&self.doing);
@@ -1290,6 +1320,9 @@ impl<P: PlaybackProducts> MapSide<P> {
                 Err(TryRecvError::Disconnected) => return Err(io::Error::other("The playhead host's worker stopped")),
             }
         }
+        if !self.composing && self.demand != self.views.demand() {
+            self.remirror()?;
+        }
         let swapped = frame.swapped.is_some();
         if !swapped && (!self.composing || self.entry.maps.load(Ordering::Acquire) > 1) {
             let (started, cycles) = (Instant::now(), replay_frame::cpu::thread_cycles());
@@ -1310,7 +1343,7 @@ impl<P: PlaybackProducts> MapSide<P> {
         let mut compose = vec![false; self.layers.len()];
         let mut applied = Vec::with_capacity(steps.len());
         let (resets_before, applied_before) = (self.resets_taken, self.applied);
-        let (mut waiting, mut after_reset, mut crossing) = (self.composing, false, false);
+        let (mut waiting, mut after_reset) = (self.composing, false);
         let mut moved = viewer_unit_reads::counter_move::MovedHours::default();
         while let Some(step) = steps.pop_front() {
             waiting |= step.last() > head;
@@ -1322,15 +1355,15 @@ impl<P: PlaybackProducts> MapSide<P> {
             if self.overlay.is_some() {
                 self.moved_before(&step, &mut moved);
             }
-            crossing |= self.take_step(&step, &mut frame, &mut compose);
+            self.take_step(&step, &mut frame, &mut compose);
             applied.push(step);
             (waiting, after_reset) = (waiting || reset, after_reset || reset);
         }
         if self.superseded && self.resets_taken == resets_before {
             compose.fill(false);
         } else if !self.composing {
-            for (wanted, again) in compose.iter_mut().zip(&mut self.recompose) {
-                *wanted |= std::mem::take(again);
+            for (wanted, &again) in compose.iter_mut().zip(&self.recompose) {
+                *wanted |= again;
             }
             if self.applied.is_some() {
                 for (at, wanted) in compose.iter_mut().enumerate() {
@@ -1340,8 +1373,8 @@ impl<P: PlaybackProducts> MapSide<P> {
         }
         let home = |compose: &mut [bool], mirrors: Option<&Mirrors>| {
             if let Some(mirrors) = mirrors {
-                for (wanted, reads) in compose.iter_mut().zip(&self.reads) {
-                    *wanted &= reads.as_ref().is_ok_and(|tables| tables.iter().all(|&table| mirrors.get(TableId::ALL[table]).is_some()));
+                for (wanted, declared) in compose.iter_mut().zip(&self.declared_each) {
+                    *wanted &= declared.as_ref().is_some_and(|(tables, _)| reads_held(mirrors, tables));
                 }
             }
         };
@@ -1352,7 +1385,12 @@ impl<P: PlaybackProducts> MapSide<P> {
             }
         }
         home(&mut compose[..], self.mirrors.as_deref());
-        let composed_here = crossing && !after_reset && !self.composing && !self.superseded && compose.contains(&true);
+        for (wanted, again) in compose.iter().zip(&mut self.recompose) {
+            if *wanted {
+                *again = false;
+            }
+        }
+        let composed_here = !after_reset && self.drawn.is_some() && !self.composing && !self.superseded && compose.contains(&true);
         if composed_here {
             self.compose_here(&compose, &mut frame);
         }
@@ -1635,7 +1673,7 @@ impl<P: PlaybackProducts> MapSide<P> {
             if matches!(layer.published(), Published::Cadence(_)) {
                 continue;
             }
-            self.mode_settled[at] |= layer.uploaded() && layer.carried().entities == 0 && !matches!(layer.published(), Published::Nothing);
+            self.mode_settled[at] |= layer.mode_ready() && layer.uploaded() && layer.carried().entities == 0 && !matches!(layer.published(), Published::Nothing);
             mode_settled &= self.mode_settled[at];
             fresh &= self.fresh[at];
             drawn += 1;
@@ -1733,28 +1771,75 @@ impl<P: PlaybackProducts> MapSide<P> {
         self.layer_parts().draws(name)
     }
 
+    fn whole_progress(&mut self) -> &Receiver<()> {
+        let (ready, _) = self.progress.get_or_insert_with(|| {
+            let (send, ready) = mpsc::sync_channel(1);
+            let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || { let _ = send.try_send(()); });
+            self.views.set_whole_wake(Arc::clone(&wake));
+            (ready, self.entry.playhead.watch(wake))
+        });
+        ready
+    }
+
+    fn frame_whole_step(&mut self, head: Hour, lay: bool) -> io::Result<Frame> {
+        let was = self.consumer.set_blocking(true);
+        let result = self.frame_within(head, Settling::step(), lay);
+        self.consumer.set_blocking(was);
+        result
+    }
+
+    fn wait_whole_progress(&mut self, until: Instant) -> io::Result<bool> {
+        #[cfg(test)]
+        if let Some(before_wait) = self.before_whole_wait.take() {
+            before_wait();
+        }
+        self.continuing()?;
+        let woke = self.whole_progress().recv_timeout(until.saturating_duration_since(Instant::now())).is_ok();
+        self.continuing()?;
+        Ok(woke)
+    }
+
+    fn continuing(&self) -> io::Result<()> {
+        if self.retired.load(Ordering::Acquire) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "The map side is retiring"));
+        }
+        Ok(())
+    }
+
+    fn next_step(&self) -> Option<Hour> {
+        let epoch = self.entry.playhead.epoch();
+        self.pending.iter().find(|step| step.epoch() == epoch).map(|step| step.last()).or_else(|| self.consumer.next_hour())
+    }
+
+    fn makers_can_step(&self, hour: Hour) -> bool {
+        !self.composing && !self.makers_home() && self.next_step().is_some_and(|next| next <= hour)
+    }
+
     pub fn catch_up(&mut self, head: Hour) -> io::Result<()> {
         self.stepped = true;
         self.combat_whole = None;
-        let started = Instant::now();
+        let until = Instant::now() + CATCHING_UP;
         loop {
-            let newest = self.entry.playhead.newest().unwrap_or(head);
-            self.frame_within(head.min(newest.max(self.applied.unwrap_or(newest))), crate::layers::Settling::step(), false)?;
-            if !self.composing && !self.superseded && self.applied == Some(head) && self.ready.iter().zip(&self.reads).all(|(&ready, reads)| ready || reads.is_err()) {
-                self.settle_all()?;
-                if self.head_products_reached(head) && self.overlay_whole(head)? {
+            let _ = self.whole_progress().try_recv();
+            self.continuing()?;
+            let frame = self.frame_whole_step(head, false)?;
+            if !self.composing && !self.superseded && self.applied == Some(head) && self.makers_home() && self.ready.iter().zip(&self.reads).all(|(&ready, reads)| ready || reads.is_err()) {
+                if self.settle_makers()? && self.overlay_whole(head)? {
                     self.combat_whole = self.combat_whole();
-                    self.update_shown();
-                    return Ok(());
+                    if self.whole_ready_at(head) {
+                        self.update_shown();
+                        return Ok(());
+                    }
                 }
             }
             if let Some(error) = self.entry.playhead.error() {
                 return Err(io::Error::other(format!("The playhead stopped: {error}")));
             }
-            if started.elapsed() > CATCHING_UP {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, self.waiting_state(head)));
+            let local = !self.composing && (frame.steps > 0 || frame.swapped.is_some() || frame.exact || self.next_step().is_some_and(|next| next <= head));
+            if Instant::now() < until && (local || self.wait_whole_progress(until)?) {
+                continue;
             }
-            std::thread::sleep(std::time::Duration::from_micros(200));
+            return Err(io::Error::new(io::ErrorKind::TimedOut, self.waiting_state(head)));
         }
     }
 
@@ -1793,27 +1878,19 @@ impl<P: PlaybackProducts> MapSide<P> {
     }
 
     fn overlay_whole(&mut self, head: Hour) -> io::Result<bool> {
-        if self.overlay.is_none() {
+        if self.overlay.as_deref().is_none_or(|overlay| !overlay.asked()) {
             return Ok(true);
         }
-        let until = Instant::now() + HANDS_BACK;
         for lay in [false, true] {
-            loop {
-                if self.vision_refused().is_some() {
-                    return Ok(true);
-                }
-                self.post_makers();
-                let asked = self.ask_overlay_step(true, lay, Arc::default());
-                self.post_makers();
-                if asked && self.join_overlay(Settling::Whole) {
-                    break;
-                }
-                if Instant::now() >= until {
-                    return Ok(false);
-                }
-                std::thread::sleep(std::time::Duration::from_micros(200));
+            if self.vision_refused().is_some() {
+                return Ok(true);
             }
-            self.settle_all()?;
+            self.post_makers();
+            let asked = self.ask_overlay_step(true, lay, Arc::default());
+            self.post_makers();
+            if !self.makers_home() || !asked || !self.join_overlay(Settling::Whole) || !self.settle_makers()? {
+                return Ok(false);
+            }
         }
         Ok(self.overlay.as_deref().expect("held above").stands_at(head))
     }
@@ -1825,6 +1902,10 @@ impl<P: PlaybackProducts> MapSide<P> {
                 return self.combat.open().then_some(Ok(()));
             }
             self.post_makers();
+            if !self.makers_home() {
+                return None;
+            }
+            self.views.made();
             let joined = self.combat.join(Settling::Whole, std::time::Duration::ZERO);
             if joined.made {
                 return Some(Ok(()));
@@ -1841,6 +1922,24 @@ impl<P: PlaybackProducts> MapSide<P> {
 
     fn head_products_reached(&self, head: Hour) -> bool {
         (0..self.layers.len()).filter(|&at| self.reads[at].is_ok() && self.ready[at]).all(|at| self.layers[at].made_at(head))
+    }
+
+    fn whole_ready_at(&self, head: Hour) -> bool {
+        self.applied == Some(head) && !self.composing && !self.superseded && self.makers_home()
+            && self.epoch == self.entry.playhead.epoch()
+            && self.ready.iter().zip(&self.reads).all(|(&ready, reads)| ready || reads.is_err()) && self.head_products_reached(head)
+    }
+
+    fn makers_home(&self) -> bool {
+        self.demand == self.views.demand()
+            && self.mirrors.as_deref().is_some_and(|mirrors| {
+                reads_held(mirrors, &self.declared)
+            })
+    }
+
+    fn step_makers(&mut self, lay: bool) -> io::Result<()> {
+        self.applied.filter(|_| self.epoch == self.entry.playhead.epoch() && !self.makers_home())
+            .map_or(Ok(()), |hour| self.frame_whole_step(hour, lay).map(|_| ()))
     }
 
     fn post_makers(&mut self) {
@@ -1883,6 +1982,29 @@ impl<P: PlaybackProducts> MapSide<P> {
     }
 
     pub fn settle_all(&mut self) -> io::Result<()> {
+        let until = Instant::now() + CATCHING_UP;
+        let epoch = self.epoch;
+        loop {
+            let _ = self.whole_progress().try_recv();
+            self.continuing()?;
+            if epoch != self.entry.playhead.epoch() {
+                return Ok(());
+            }
+            if self.settle_makers()? || epoch != self.entry.playhead.epoch() {
+                return Ok(());
+            }
+            if let Some(error) = self.entry.playhead.error() {
+                return Err(io::Error::other(format!("The playhead stopped: {error}")));
+            }
+            let Some(hour) = self.applied else { return Ok(()) };
+            if Instant::now() >= until || (!self.makers_can_step(hour) && !self.wait_whole_progress(until)?) {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, self.waiting_state(hour)));
+            }
+        }
+    }
+
+    fn settle_makers(&mut self) -> io::Result<bool> {
+        self.step_makers(false)?;
         self.doing.set(Doing::WHOLE);
         self.post_makers();
         self.views.made();
@@ -1907,7 +2029,7 @@ impl<P: PlaybackProducts> MapSide<P> {
             }
         }
         self.doing.set(Doing::IDLE);
-        Ok(())
+        Ok(self.applied.is_none_or(|hour| self.whole_ready_at(hour)))
     }
 
     pub fn upload(&mut self, gpu: &mut Gpu<'_>) -> io::Result<()> {
@@ -1997,7 +2119,7 @@ impl<P: PlaybackProducts> MapSide<P> {
         }
     }
 
-    fn take_step(&mut self, step: &Arc<Step>, frame: &mut Frame, compose: &mut [bool]) -> bool {
+    fn take_step(&mut self, step: &Arc<Step>, frame: &mut Frame, compose: &mut [bool]) {
         let mut reset_tables = BTreeSet::new();
         let mut judged: Vec<(usize, Box<Mirror>)> = Vec::new();
         if piece::on() && !step.reset() {
@@ -2010,16 +2132,15 @@ impl<P: PlaybackProducts> MapSide<P> {
             }
         }
         let mirrors = self.mirrors.as_mut().and_then(Arc::get_mut).expect("the mirrors are home and the step's views made");
-        let mut replaced = false;
         for changes in step.tables() {
             if changes.reset()
+                && self.declared.contains_key(&changes.table())
                 && let Some(state) = self.consumer.state(step, changes.table())
                 && let Ok(mut rebuilt) = state.downcast::<Mirror>()
             {
                 rebuilt.set_capture(self.entry.capture.get().copied());
                 if let Some(old) = mirrors.insert(rebuilt) {
                     self.worker.drop_later(old);
-                    replaced = true;
                 }
                 reset_tables.insert(changes.table());
             }
@@ -2027,10 +2148,8 @@ impl<P: PlaybackProducts> MapSide<P> {
                 let moved = old.iter().enumerate().filter(|&(new, &from)| from as usize != new).count();
                 frame.renumbers.push((changes.table(), old.len() as u32, moved as u32));
                 reset_tables.insert(changes.table());
-                replaced = true;
             }
         }
-        let crossing = !step.reset() && replaced;
         frame.reset_tables.extend(reset_tables.iter().copied());
         frame.reset_step |= step.reset();
         let (started, cycles) = (Instant::now(), replay_frame::cpu::thread_cycles());
@@ -2070,7 +2189,6 @@ impl<P: PlaybackProducts> MapSide<P> {
         for (wanted, reads) in compose.iter_mut().zip(&self.reads) {
             *wanted |= reads.as_ref().is_ok_and(|tables| step.reset() || tables.iter().any(|table| reset_tables.contains(table)));
         }
-        crossing
     }
 
     fn compose_here(&mut self, compose: &[bool], frame: &mut Frame) {
@@ -2185,7 +2303,10 @@ impl<P: PlaybackProducts> MapSide<P> {
     }
 
     pub fn layer_retirements(&self) -> Vec<crate::layers::Retirement> {
-        self.layers.iter().filter_map(|layer| layer.retirement()).collect()
+        let retired = Arc::clone(&self.retired);
+        let progress = self.views.handle().progress_notifier();
+        let wake: crate::layers::Retirement = Box::new(move || { retired.store(true, Ordering::Release); progress(); });
+        self.layers.iter().filter_map(|layer| layer.retirement()).chain([wake]).collect()
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -2261,6 +2382,7 @@ impl<P: PlaybackProducts> MapSide<P> {
         self.view_shown != *view
             || self.mode.as_ref() != Some(&view.map_mode)
             || !self.whole
+            || !self.makers_home()
             || !self.on_screen().is_some_and(|on| on.settled && on.drawn == Some(head))
             || self.overlay.as_deref().is_some_and(|overlay| overlay.offered_stale(self.layer_parts(), self.branch))
             || self.answers_waiting()
@@ -2343,6 +2465,9 @@ fn declare(entry: &Entry, layers: &mut [Box<dyn Layer>], view: &View) -> Declari
                     held.columns.extend(read.columns);
                     held.columns.sort_unstable();
                     held.columns.dedup();
+                    held.watched.extend(read.watched);
+                    held.watched.sort_unstable();
+                    held.watched.dedup();
                     held.keyed |= read.keyed;
                     held.hourly |= read.hourly;
                 }
@@ -2375,15 +2500,6 @@ pub(crate) fn timeline_runs(entry: &Entry) -> Vec<usize> {
     runs
 }
 
-fn for_the_makers(entry: &Entry) -> BTreeMap<usize, Read> {
-    let kinds = entry.kinds();
-    let written = entry.pages.written_tables(&timeline_runs(entry), kinds.len());
-    (0..kinds.len())
-        .filter(|&table| table != script_values::TABLE.index() && matches!(written[table], playhead::pages::TableWritten::Written))
-        .map(|table| (table, Read { columns: (0..kinds[table].len()).collect(), keyed: true, hourly: false }))
-        .collect()
-}
-
 fn hand_naval(names: &[&'static str], layers: &mut [Box<dyn Layer>], reads: &[Result<BTreeSet<usize>, String>], ready: &[bool]) {
     let drawn = |at: usize| reads[at].is_ok() && ready[at];
     let draws = |name: &str| names.iter().enumerate().any(|(at, held)| *held == name && drawn(at));
@@ -2412,19 +2528,37 @@ fn awake_mask(declared: &BTreeMap<usize, Read>) -> Vec<bool> {
     mask
 }
 
-fn merged(layers: &BTreeMap<usize, Read>, makers: &BTreeMap<usize, Read>) -> BTreeMap<usize, Read> {
+fn reads_held(mirrors: &Mirrors, reads: &BTreeMap<usize, Read>) -> bool {
+    reads.iter().all(|(&table, read)| mirrors.get(TableId::ALL[table]).is_some_and(|mirror| mirror.covers(read)))
+}
+
+fn merged(layers: &BTreeMap<usize, Read>, makers: Vec<(Declared, bool)>) -> BTreeMap<usize, Read> {
     let mut union = layers.clone();
-    for (&table, read) in makers {
-        let held = union.entry(table).or_default();
-        held.columns.extend(read.columns.iter().copied());
-        held.columns.sort_unstable();
-        held.columns.dedup();
+    for (read, exact) in makers {
+        let held = union.entry(read.table).or_default();
+        let columns = if exact { &mut held.watched } else { &mut held.columns };
+        columns.extend(read.columns);
+        columns.sort_unstable();
+        columns.dedup();
         held.keyed |= read.keyed;
         held.hourly |= read.hourly;
     }
     union
 }
 
-fn to_declared(declared: &BTreeMap<usize, Read>) -> Vec<Declared> {
-    declared.iter().map(|(&table, read)| Declared { table, columns: read.columns.clone(), keyed: read.keyed, passing: false, hourly: read.hourly }).collect()
+fn to_declared(declared: &BTreeMap<usize, Read>) -> (Vec<Declared>, BTreeMap<usize, Vec<usize>>) {
+    let mut projections = BTreeMap::new();
+    let tables = declared.iter().map(|(&table, read)| {
+        let mut columns = read.columns.clone();
+        if !read.watched.is_empty() {
+            columns.extend_from_slice(&read.watched);
+            columns.sort_unstable();
+            columns.dedup();
+            if columns != read.columns {
+                projections.insert(table, read.columns.clone());
+            }
+        }
+        Declared { table, columns, keyed: read.keyed, passing: false, hourly: read.hourly }
+    }).collect();
+    (tables, projections)
 }

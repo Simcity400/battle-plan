@@ -28,6 +28,7 @@ const CORE: [TableId; 5] = [TableId::Countries, TableId::CountryLinks, TableId::
 const CATCH_UP: Duration = Duration::from_secs(120);
 
 pub trait Evaluate: Send + Sync + 'static {
+    fn row_tables(&self) -> &[TableId] { &[] }
     fn icons(&self, frame: &DecodedFrame, choice: &perspective::Choice) -> IntelIcons;
 }
 
@@ -85,6 +86,7 @@ impl Open {
         let reader = views.reader_at(NAME, &tables.iter().copied().map(Need::every).collect::<Vec<Need>>(), pace);
         let (jobs, receive) = mpsc::channel::<Work>();
         let (send, done) = viewer_runtime::landed::channel();
+        let progress = views.progress_notifier();
         let evaluate = Arc::clone(evaluate);
         std::thread::Builder::new().name("intel icons".into()).spawn(move || {
             viewer_runtime::worker_priority::enter(viewer_runtime::worker_priority::Class::Kept);
@@ -115,6 +117,7 @@ impl Open {
                 if send.send(Done { icons, failures, missed, hour, frame, ns: started.elapsed().as_nanos() as u64, epoch: job.epoch }).is_err() {
                     return;
                 }
+                progress();
             }
         })?;
         Ok(Self { reader, jobs, done, busy: false, seen: None, handed: false })
@@ -206,7 +209,11 @@ pub struct Icons {
 
 impl Icons {
     pub fn new(evaluate: Arc<dyn Evaluate>, pace: Pace) -> Self {
-        Self { evaluate, retiring: RetirementFlag::default(), views: None, pace, shown: false, choice: perspective::Choice::default(), tables: CORE.to_vec(), open: None, icons: None, stands: None, epoch: 0, applied: None, stats: Stats::default(), installs: Installs::default() }
+        let mut tables = CORE.to_vec();
+        tables.extend_from_slice(evaluate.row_tables());
+        tables.sort_unstable_by_key(|table| table.index());
+        tables.dedup();
+        Self { evaluate, retiring: RetirementFlag::default(), views: None, pace, shown: false, choice: perspective::Choice::default(), tables, open: None, icons: None, stands: None, epoch: 0, applied: None, stats: Stats::default(), installs: Installs::default() }
     }
 
     pub fn icons(&self) -> Option<(&Arc<IntelIcons>, Hour)> {
@@ -442,6 +449,7 @@ impl Layer for Icons {
             self.close();
             return Ok(());
         }
+        self.ensure_open();
         inputs.table(TableId::Countries, true)
     }
 
@@ -495,6 +503,12 @@ impl Layer for Icons {
 
     fn published(&self) -> Published {
         self.icons.as_ref().map_or(Published::Current, |installed| Published::Cadence(self.stands.as_ref().map_or(installed.shown.1, |stands| stands.hour().max(installed.shown.1))))
+    }
+
+    fn made_at(&self, hour: Hour) -> bool {
+        self.open.as_ref().is_none_or(|open| {
+            !open.busy && open.seen.is_some() && open.handed && matches!(self.published(), Published::Cadence(held) if held == hour)
+        })
     }
 
     fn held(&self) -> usize {

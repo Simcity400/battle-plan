@@ -1,6 +1,10 @@
 
 pub fn map_lines(side: &crate::map_open::MapSide) -> [Vec<String>; 2] {
-    let limitations = crate::limitations::lines(side).unwrap_or_else(|| vec![MAP_LINES_LOADING.to_owned()]);
+    cached_map_lines(side, &mut Default::default())
+}
+
+pub(crate) fn cached_map_lines(side: &crate::map_open::MapSide, cache: &mut crate::limitations::FactsCache) -> [Vec<String>; 2] {
+    let limitations = crate::limitations::cached_lines(side, cache).unwrap_or_else(|| vec![MAP_LINES_LOADING.to_owned()]);
     let mut lines = Vec::new();
     if let Some((_, layers)) = side.parts() {
         let layer = |name: &str| layers.iter().find(|layer| layer.name() == name && side.draws(name));

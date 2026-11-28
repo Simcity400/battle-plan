@@ -107,6 +107,31 @@ fn a_tables_row_note_is_todays_whether_or_not_a_drawn_layer_reads_its_column() {
 }
 
 #[test]
+fn a_report_only_ship_counter_decode_error_names_the_field() {
+    use viewer_layer_core::test_support::recorded::column;
+    use replay_columnar::state::Cell;
+
+    let table = TableId::ShipModels;
+    let units = record("damaged ship counter note", 8, |at, store| {
+        store.status(table.index(), Status::Complete, true, Some(at as i32), true).unwrap();
+        if at == 0 {
+            let mut rows = store.table(table.index()).unwrap();
+            rows.insert_at(0, 1).unwrap();
+            rows.write(0, column(table, "counter"), Cell::Opaque(&[255])).unwrap();
+        }
+    });
+    let entry = open(units, hourly_steps()).unwrap();
+    let (side_layer, _) = Reads::new(&[TableId::Countries]);
+    let mut side = MapSide::with_products(entry, vec![side_layer], View::default()).unwrap();
+    side.anchor(4, false, 0.0, true);
+    side.catch_up(4).unwrap();
+    assert!(side.parts().unwrap().0.get(table).is_none());
+    let lines = super::lines(&side).unwrap();
+    let reason = format!("{}Field ShipModels formation: ShipModels.counter could not be read: ", super::NOT_GIVEN);
+    assert!(lines.iter().any(|line| line.strip_prefix(&reason).is_some_and(|details| !details.is_empty())), "{lines:?}");
+}
+
+#[test]
 fn todays_lines_of_a_layer_the_map_does_not_register_are_counted_apart_by_owner_and_not_compared() {
     const TRAINS: &[&str] = &["trains"];
     let phase = "Field Supply train phase: the scheduler is unrecorded".to_owned();
