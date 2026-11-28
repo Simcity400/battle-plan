@@ -3,6 +3,7 @@ import test from 'node:test';
 import { encode } from '@msgpack/msgpack';
 import type { Fact } from '../dashboard/follow/facts.ts';
 import { Page, type Bitmap, type PageMessage } from '../dashboard/follow/page.ts';
+import { PayloadSender } from '../dashboard/follow/payloads.ts';
 import { Lane, type LaneView, type Painted, type Value } from '../draw/lane.ts';
 import { cropSurfaces } from '../draw/laneDispatch.ts';
 import type { BoundedReadView, FamilyProjection } from './contract.ts';
@@ -1069,17 +1070,31 @@ test('shrinking a visible widget to zero size withdraws its installed picture, m
   }
 });
 
-test('a seek inside the same proof clears a lingering marker deadline on a stationary widget without breaking quiet reuse', async () => {
+test('pause and seek restore exact layout inside the same proof without breaking quiet reuse', async () => {
   const recording = installRecordingCanvas();
   try {
     let draws = 0;
     let lastContinuity = -1;
     let markerShown = false;
+    let trackingWidths = false;
+    let holdingWidths = false;
+    let lastHeld = false;
+    const layouts: [number, number, boolean][] = [];
+    const heldLayout = new WeakSet<Layout>();
     const expiring: LaneFamily<Binding, Model, Layout> = {
       ...family,
+      get layoutTracksPlayback() { return trackingWidths ? true : undefined; },
+      layout(model, binding, surface, theme, measure, hour, step) {
+        layouts.push([hour, step.speed, step.previousLayout != null]);
+        const layout = family.layout(model, binding, surface, theme, measure, hour, step);
+        if (holdingWidths && step.speed > 0 && step.previousLayout != null) heldLayout.add(layout);
+        return layout;
+      },
+      layoutHeld: layout => heldLayout.has(layout),
       paint(ctx, frame) {
         draws++;
         lastContinuity = frame.continuity;
+        lastHeld = heldLayout.has(frame.layout);
         family.paint(ctx, frame);
         if (draws === 1) {
           markerShown = true;
@@ -1108,8 +1123,8 @@ test('a seek inside the same proof clears a lingering marker deadline on a stati
       fail: reason => { throw new Error(reason); },
       later: () => {},
     });
-    const bound = binding(rowsAt([{ key: 'A', v: 1 }]));
-    lane.mount(1, [], 'test-lane', bound);
+    const firstBinding = new PayloadSender(message => lane.payloads(message)).acquire(binding(rowsAt([{ key: 'A', v: 1 }])));
+    lane.mount(1, [], 'test-lane', firstBinding.wire);
     lane.bind(1, { generation: 1, owner: 'o1', surfaces: [{ width: 200, height: 100, dpr: 1 }], offset: 0, pin: null, dated: { h: 0, c: 100 } });
     page.mount(1, { route: 0, lane: 0, owner: 'o1', surfaces: [{ install() {}, clear() {} }] });
 
@@ -1144,6 +1159,36 @@ test('a seek inside the same proof clears a lingering marker deadline on a stati
     await new Promise<void>(r => setImmediate(r));
     page.frame();
     assert.equal(draws, 3, 'a stationary family returning false after forward playback is not marked ephemeral and reuses across a seek');
+
+    const step = async (hour: number, playing: boolean, seek: number) => {
+      page.publish(hour, { playing, seek, speed: playing ? 24 : 0, step: 1 });
+      await new Promise<void>(r => setImmediate(r));
+      page.frame();
+    };
+    trackingWidths = true;
+    await step(30, true, 3);
+    const beforeExactSeek = draws;
+    const exactHour = layouts.at(-1)![0];
+    await step(exactHour, true, 4);
+    assert.equal(draws, beforeExactSeek + 1, 'seeking within an exact table still seeds its next fit');
+    assert.equal(lastHeld, false);
+    holdingWidths = true;
+    await step(40, true, 4);
+    assert.ok(lastHeld, 'playing shows a width inherited from the previous layout');
+    const beforeSeek = draws;
+    const seekHour = layouts.at(-1)![0];
+    await step(seekHour, true, 5);
+    assert.equal(draws, beforeSeek + 1);
+    assert.equal(layouts.at(-1)![0], seekHour, 'the seek stays within the same proof');
+    assert.equal(lastHeld, false, 'a seek drops previous widths even inside an unchanged proof');
+    await step(50, true, 5);
+    assert.ok(lastHeld, JSON.stringify(layouts));
+    const beforePause = draws;
+    const pauseHour = layouts.at(-1)![0];
+    await step(pauseHour, false, 5);
+    assert.equal(draws, beforePause + 1);
+    assert.equal(layouts.at(-1)![0], pauseHour);
+    assert.equal(lastHeld, false, 'pause installs an exact fit without a new hour or binding');
   } finally {
     recording.restore();
   }
