@@ -120,9 +120,50 @@ fn the_region_catalogue_keeps_named_regions_when_their_membership_is_unread() {
 }
 
 #[test]
+fn pending_place_preparation_cannot_bind_a_replaced_folder() {
+    use dashboard_base::{presentation::Presentation, source::Work};
+    use std::sync::mpsc;
+
+    let (source, old, saved, _folder) = fixture_source(vec![frame(100)]);
+    let source = Arc::new(source);
+    let options = old.content().unwrap();
+    source.bind(Some((&options.options, options.allow_unverified)), Presentation::default());
+    let old = LoadContext { content: source.admit(Work::Recorded) };
+    let old_catalogue = source.in_scope(|| Content::read(&source, &old)).unwrap();
+
+    let machine = dashboard_base::test_fixtures::visual_mods::Machine::new("place_preparation_binding");
+    let old_options = &old.content().unwrap().options;
+    let mut new_options = old_options.clone();
+    new_options.game_dir = machine.root.clone();
+    let (entered, has_entered) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    let ready = Content::prepare_with(&source, &old, move || {
+        entered.send(()).unwrap();
+        released.recv().unwrap();
+    }).unwrap().unwrap();
+    has_entered.recv().unwrap();
+    source.bind(Some((&new_options, old.content().unwrap().allow_unverified)), Presentation::default());
+    let current = source.content(&new_options).unwrap();
+    release.send(()).unwrap();
+
+    let error = ready.wait().unwrap_err();
+    assert!(source.bound_content(old_options).is_none());
+    assert!(Arc::ptr_eq(&current, &source.bound_content(&new_options).unwrap()));
+    assert_eq!(old_catalogue.cat.content_loads(), 0);
+    assert_eq!(dashboard_core::refusal(&error), Some("Place names unavailable: the content selection changed during preparation"));
+    drop(source);
+    std::fs::remove_dir_all(saved).unwrap();
+}
+
+#[test]
 fn places_are_named_by_rename_victory_point_then_state_and_a_place_not_read_is_a_reason() {
+    use dashboard_base::{presentation::Presentation, source::Work};
+
     let (source, load, saved, _folder) = fixture_source((100..=110).map(frame).collect());
     let source = Arc::new(source);
+    let options = load.content().unwrap();
+    source.bind(Some((&options.options, options.allow_unverified)), Presentation::default());
+    let load = LoadContext { content: source.admit(Work::Recorded) };
     let query = dashboard_base::queries::query(&source, 1).unwrap();
     let content = source.in_scope(|| {
         use super::super::place_name_runs::{PlacePoint, names_at};

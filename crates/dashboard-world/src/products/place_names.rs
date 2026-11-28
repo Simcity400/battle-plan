@@ -97,9 +97,18 @@ impl Content {
     }
 
     pub(super) fn prepare(source: &Arc<Source>, load: &LoadContext) -> io::Result<Option<Arc<Preparation>>> {
+        Self::prepare_with(source, load, || {})
+    }
+
+    fn prepare_with(source: &Arc<Source>, load: &LoadContext, before_load: impl FnOnce() + Send + 'static) -> io::Result<Option<Arc<Preparation>>> {
         let Some(options) = &load.content else { return Ok(None); };
         let binding = Arc::clone(options.presentation.binding());
-        check_cancel(binding.flag())?;
+        let still_selected = |binding: &dashboard_base::presentation::Binding| {
+            check_cancel(binding.flag()).map_err(|_| dashboard_core::refused("Place names unavailable: the content selection changed during preparation"))
+        };
+        let has_content = source.bound_content(&options.options).is_some();
+        still_selected(&binding)?;
+        if !has_content { return Ok(None); }
         let key = (dashboard_base::content::localisation_key(options), binding.generation);
         let state = source.state::<Preload>();
         let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
@@ -109,16 +118,18 @@ impl Content {
         *slot = Some((key, Arc::clone(&ready)));
         drop(state);
         let source = Arc::downgrade(source);
-        let load = LoadContext { content: Some(options.clone()) };
+        let options = options.clone();
         ready.start("row place names ahead", move || {
             let source = source.upgrade().ok_or_else(|| io::Error::other("Recording closed"))?;
-            check_cancel(binding.flag())?;
+            still_selected(&binding)?;
+            before_load();
             source.in_scope(|| {
-                if let Ok(content) = Self::read(&source, &load) {
-                    drop(content.cat.cached_states());
+                if let Some(Ok(catalogue)) = catalogue::bound_catalogue(&source, &options) {
+                    still_selected(&binding)?;
+                    drop(catalogue.cached_states());
                 }
-            });
-            check_cancel(binding.flag())
+                still_selected(&binding)
+            })
         });
         ready.pending()
     }
