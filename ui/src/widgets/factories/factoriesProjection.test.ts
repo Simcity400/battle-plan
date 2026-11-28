@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { assertBarsModelValid, deriveBarsAudit, type BarsDataRow } from '../../families/bars/model.ts';
+import { assertBarsModelValid, deriveBarsAudit, deriveBarsMirror, type BarsDataRow } from '../../families/bars/model.ts';
 import { createBoundedReadView, displayedHour, FutureDataError } from '../../families/boundedView.ts';
 import type { IdentityProvider } from '../../families/plan.ts';
 import { factoriesDeclaration, factoriesProjection, type FactoriesProjectionOptions } from './factoriesProjection.ts';
@@ -116,6 +116,10 @@ test('factories projection splits into group segments and rejects reads past dis
   assert.equal(signed.numeric, 8);
   assert.deepEqual(signed.segments?.map(s => s.key), ['military']);
   assert.equal(signed.tooltip?.items?.find(item => item.label === 'Civilian factories')?.value, '\u22122');
+  assert.equal(deriveBarsMirror(model).rows[1]?.cells.find(cell => cell.column === 'segments')?.spoken,
+    'Military factories 10, Naval dockyards 0, Civilian factories \u22122');
+  assert.equal(deriveBarsAudit(model).find(cell => cell.key === 'ENG:part:civilian')?.value, '["known",["int","-2"]]');
+  assert.equal(deriveBarsAudit(model).find(cell => cell.key === 'ENG:part:naval')?.value, '["zero",["int","0"]]');
   assert.throws(() => view.who('country', 'GER', displayedHour(301)), FutureDataError);
 });
 
@@ -144,6 +148,14 @@ test('a missing part leaves the rest of the proven total as not recorded, and mi
     ['military', 40, 'known', false],
     ['unrecorded', 60, 'notRecorded', true],
   ]);
+  assert.match(deriveBarsMirror(split).rows[0]?.cells.find(cell => cell.column === 'segments')?.spoken ?? '', /Naval dockyards.*not recorded: Dockyards not recorded/i);
+  assert.equal(deriveBarsAudit(split).find(cell => cell.key === 'GER:part:naval')?.value, '["notRecorded","Dockyards not recorded"]');
+  const withoutMeasure = factoriesProjection.project(partsView(300, panelOf(300, [
+    ['GER', 100, 40, 60],
+  ], ['free7', 'free1', 'free4'])), { ...BASE_OPTS, split: true });
+  assert.equal((withoutMeasure.rows[0] as BarsDataRow).segments, undefined);
+  assert.equal(deriveBarsAudit(withoutMeasure).find(cell => cell.key === 'GER:part:naval')?.value, '["notRecorded","Not recorded at this hour"]');
+  assert.equal(deriveBarsAudit(withoutMeasure).find(cell => cell.key === 'GER:part:civilian')?.value, '["known",["int","60"]]');
 
   const built = { ...BASE_OPTS, mode: 'built' as const, damagedSource: 'damaged7' };
   const unknownDamage = factoriesProjection.project(partsView(300, panelOf(300, [['GER', 100, 'Damage not recorded']], ['built7', 'damaged7'])), built).rows[0] as BarsDataRow;

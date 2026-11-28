@@ -3,7 +3,7 @@ import { colour } from '../../charts/palette.ts';
 import { validateRankReply } from '../../charts/race/measureRaceData.ts';
 import { countryKey } from '../../dashboard/countryKey.ts';
 import { contentSet } from '../../dashboard/options.ts';
-import { barsLabelText, countryRowPresentation, formatBarsValueField, type BarsDataRow, type BarsModel, type BarsProjection, type BarsSegment } from '../../families/bars/model.ts';
+import { barsLabelText, countryRowPresentation, formatBarsValueField, type BarsDataRow, type BarsModel, type BarsPartReading, type BarsProjection, type BarsSegment } from '../../families/bars/model.ts';
 import { registerFamilyProjection } from '../../families/registry.ts';
 import type { BarsWidgetDeclaration } from '../../families/bars/declaration.ts';
 import type { BoundedReadView, FamilyPlanContext, SourceCoverage, SourcePlan } from '../../families/contract.ts';
@@ -103,54 +103,63 @@ function segment(key: string, label: string, amount: number, total: number, colo
 function buildPartSegments(
   index: PanelIndex,
   wireName: string,
-  total: number,
+  total: number | null,
   options: FactoriesProjectionOptions,
   baseColor: string | undefined,
-): Pick<BarsDataRow, 'segments' | 'segmentsIncomplete'> & { readonly tooltipItems: TooltipListItem[] } {
+): Pick<BarsDataRow, 'segments' | 'segmentsIncomplete' | 'partReadings'> & { readonly tooltipItems: TooltipListItem[] } {
   if (!options.split && options.mode !== 'built') return { tooltipItems: [] };
 
   const tooltipItems: TooltipListItem[] = [];
   if (!options.split) {
-    const damaged = options.damagedSource ? partValue(index, options.damagedSource, wireName) : null;
-    const amount = damaged === null ? null : numericOf(damaged);
+    const requestedDamage = options.damagedSource ? partValue(index, options.damagedSource, wireName) : null;
+    const damaged = requestedDamage ?? notRecorded(PART_NOT_READ);
+    const partReadings = [{ key: 'damaged', label: 'Damaged', value: damaged }];
+    if (total === null) return { tooltipItems, partReadings };
+    const amount = numericOf(damaged);
     if (amount === null) {
-      tooltipItems.push({ label: 'Damaged', missingReason: damaged === null ? PART_NOT_READ : reasonOf(damaged) });
-      return { tooltipItems, segmentsIncomplete: true };
+      tooltipItems.push({ label: 'Damaged', missingReason: reasonOf(damaged) });
+      return { tooltipItems, partReadings, segmentsIncomplete: true };
     }
-    if (total <= 0) return { tooltipItems };
+    if (total <= 0) return { tooltipItems, partReadings };
     const hurt = Math.min(total, Math.max(0, amount));
     tooltipItems.push({ label: 'Damaged', value: countText(hurt) });
-    if (hurt <= 0) return { tooltipItems };
+    if (hurt <= 0) return { tooltipItems, partReadings };
     const fill = baseColor ?? colour(options.surface, 0);
     const segments: BarsSegment[] = [];
     if (total > hurt) segments.push(segment('healthy', 'Undamaged', total - hurt, total, fill));
     segments.push(segment('damaged', 'Damaged', hurt, total, fill, true));
-    return { segments, tooltipItems };
+    return { segments, tooltipItems, partReadings };
   }
 
   const segments: BarsSegment[] = [];
+  const partReadings: BarsPartReading[] = [];
   let known = 0;
   let unknownReason: string | null = null;
   let damageUnknown = false;
+  let measureAbsent = false;
   for (const spec of options.parts) {
-    const value = partValue(index, spec.source, wireName);
-    if (value === null) return { tooltipItems, segmentsIncomplete: true };
+    const requestedPart = partValue(index, spec.source, wireName);
+    measureAbsent ||= requestedPart === null;
+    const value = requestedPart ?? notRecorded(PART_NOT_READ);
+    partReadings.push({ key: spec.id, label: spec.label, value });
+    const damagedLabel = damagedGroupLabel({ label: spec.label });
+    const damagedValue = spec.damagedSource === undefined ? null : partValue(index, spec.damagedSource, wireName) ?? notRecorded(PART_NOT_READ);
+    if (damagedValue !== null) partReadings.push({ key: `damaged:${spec.id}`, label: damagedLabel, value: damagedValue });
+    if (total === null) continue;
     const amount = numericOf(value);
     if (amount === null) {
       unknownReason ??= reasonOf(value);
       if (total > 0) tooltipItems.push({ label: spec.label, swatch: spec.color, missingReason: reasonOf(value) });
       continue;
     }
-    const damagedValue = spec.damagedSource ? partValue(index, spec.damagedSource, wireName) : null;
     const damaged = damagedValue === null ? null : numericOf(damagedValue);
-    const damageMissing = spec.damagedSource !== undefined && damaged === null;
+    const damageMissing = damagedValue !== null && damaged === null;
     if (total > 0 || damageMissing) {
       tooltipItems.push({ label: spec.label, swatch: spec.color, value: countText(amount) });
     }
-    const damagedLabel = damagedGroupLabel({ label: spec.label });
     if (damageMissing) {
       damageUnknown = true;
-      tooltipItems.push({ label: damagedLabel, swatch: spec.color, missingReason: damagedValue === null ? PART_NOT_READ : reasonOf(damagedValue) });
+      tooltipItems.push({ label: damagedLabel, swatch: spec.color, missingReason: reasonOf(damagedValue) });
     }
     if (total <= 0) continue;
     const whole = Math.max(0, amount);
@@ -160,10 +169,15 @@ function buildPartSegments(
     if (whole > hurt) segments.push(segment(spec.id, spec.label, whole - hurt, total, spec.color));
     if (hurt > 0) segments.push(segment(`damaged:${spec.id}`, damagedLabel, hurt, total, spec.color, true));
   }
-  if (unknownReason !== null && total > known) {
+  if (unknownReason !== null && total !== null && total > known) {
     segments.push({ key: 'unrecorded', label: 'Not recorded', share: (total - known) / total, value: notRecorded(unknownReason), color: options.surface, hatched: true });
   }
-  return { ...(segments.length ? { segments } : {}), ...((unknownReason !== null || damageUnknown) ? { segmentsIncomplete: true } : {}), tooltipItems };
+  return {
+    ...(!measureAbsent && segments.length ? { segments } : {}),
+    ...(measureAbsent || unknownReason !== null || damageUnknown ? { segmentsIncomplete: true } : {}),
+    tooltipItems,
+    partReadings,
+  };
 }
 
 function makeRow(
@@ -177,7 +191,7 @@ function makeRow(
 ): BarsDataRow {
   const pres = countryRowPresentation(readView, displayTag);
   const numeric = numericOf(value);
-  const parts = numeric !== null ? buildPartSegments(index, wireName, numeric, options, pres.color) : { tooltipItems: [] };
+  const { tooltipItems, ...parts } = buildPartSegments(index, wireName, numeric, options, pres.color);
   const totalItem: TooltipListItem = value.kind === 'notRecorded'
     ? { label: options.modeLabel, missingReason: value.reason }
     : value.kind === 'notApplicable'
@@ -197,12 +211,11 @@ function makeRow(
       label: options.modeLabel,
     },
     numeric,
-    ...(parts.segments ? { segments: parts.segments } : {}),
-    ...(parts.segmentsIncomplete ? { segmentsIncomplete: true } : {}),
+    ...parts,
     tooltip: {
       title: barsLabelText(pres.label),
       hour: readView.hour,
-      items: [totalItem, ...parts.tooltipItems],
+      items: [totalItem, ...tooltipItems],
     },
     meta,
   };
