@@ -2380,6 +2380,58 @@ test('the movers a viewport evaluates are exactly those whose path crosses it', 
   assert.ok(glideCrossing(glide, 0, 300).length < 40, 'a viewport at the top meets only the rows passing through it');
 });
 
+test('playback keeps fitted columns until growth, pause, seek, resize or a setting changes them', () => {
+  const cols: TableColumnSpec[] = [
+    { key: 'item', label: 'Item', priority: 0, cellKind: 'item', as: 'plain', offered: ['plain'] },
+    { key: 'detail', label: 'Detail', priority: 1, text: true, as: 'plain', offered: ['plain'] },
+  ];
+  const settings = tableSettingsOf(undefined, cols, { density: 'normal', sort: { column: 'item', direction: 'ascending' } });
+  const kind = 'test-playback-fitted-widths';
+  registerFamilyProjection(declareTableProjection<{ text: string }, { text: string }, Record<string, never>>({
+    kind,
+    columns: () => cols.map(column => ({ ...column, value: row => knownValue(row.text) })),
+    rows: reply => ({ rows: [reply] }),
+    rowKey: () => 'event',
+    rowName: () => 'Event',
+  }));
+  const recorded = installRecordingCanvas();
+  try {
+    const surface = { width: 620, height: 180, dpr: 1 };
+    const lane = driveLane(createLaneView(tableLane, () => {}), recorded.canvases, surface);
+    const bind = (text: string, tableSettings = settings) => ({
+      family: 'table' as const, kind, options: NO_OPTIONS, settings: tableSettings, sources: NO_SOURCES,
+      staticPanels: { main: { text } }, theme: TEST_THEME,
+      width: surface.width, height: surface.height, scrollLeft: 0, scrollTop: 0, reducedMotion: true,
+    });
+    const short = bind('Short');
+    const wide = bind('A significantly wider event detail');
+    const wider = bind('The next recorded detail needs more horizontal space');
+    const fit = (binding: ReturnType<typeof bind>, hour: number, speed = 24, seek = 0) => {
+      const paint = lane.paint({ label: `Hour ${hour}`, binding, hour, speed, seek });
+      return paint.fields.widths!.value as { widths: Record<string, number> };
+    };
+    const exact = fit(short, 10, 0);
+    const grown = fit(wide, 11);
+    assert.ok(grown.widths.detail! > exact.widths.detail!);
+    assert.ok(grown.widths.item! < exact.widths.item!, 'the item column uses the remaining room');
+    assert.deepEqual(fit(short, 12), grown, 'a shorter detail leaves both displayed widths in place');
+    const bigger = fit(wider, 13);
+    assert.ok(bigger.widths.detail! > grown.widths.detail!, 'a wider sample grows through the ordinary fit');
+    assert.deepEqual(fit(short, 14), bigger);
+    assert.deepEqual(fit(short, 14, 0), exact, 'pausing the same picture refits it');
+    fit(wide, 15);
+    assert.deepEqual(fit(short, 16), grown);
+    assert.deepEqual(fit(short, 16, 24, 1), exact, 'seeking to the same hour refits it');
+    fit(wide, 17, 24, 1);
+    surface.height += 20;
+    assert.deepEqual(fit(short, 18, 24, 1), exact, 'a height-only resize refits the columns');
+    fit(wide, 19, 24, 1);
+    assert.deepEqual(fit(bind('Short', { ...settings, density: 'compact' }), 20, 24, 1), exact, 'a settings edit refits the columns');
+  } finally {
+    recorded.restore();
+  }
+});
+
 test('cell kinds for converted tables: an item column takes the spare width, two-way bars scale by magnitude, declared extras reach the cell, a blank cell draws nothing, and names that arrive re-measure the column', () => {
   const kinds: TableColumnSpec[] = [
     { key: 'pic', label: '', as: 'plain', offered: ['plain'], priority: 0, cellKind: 'kind', sortable: false },

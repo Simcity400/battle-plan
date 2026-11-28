@@ -495,6 +495,24 @@ fn a_damaged_part_refuses_its_table_by_name_and_no_other() {
     assert_eq!(frame.tables[TableId::WorldTension.index()], expected[2 * block + 5].0.tables[TableId::WorldTension.index()]);
     frames.seek(0, 300).unwrap();
     assert_eq!(frames.frame(1).unwrap().tables[TableId::Countries.index()], expected[300].0.tables[TableId::Countries.index()], "a seek back before the damage reads it again");
+
+    rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap().install(|| {
+        let mut parked = Frames::new(&file, &WATCHED).unwrap();
+        let (first, bytes) = parked.frame_with_parked_readers(1, 0, 299, 1024 * 1024).unwrap();
+        assert!(WATCHED.iter().all(|&table| parked.reader(table).is_some()));
+        let mut constrained = Frames::new(&file, &WATCHED).unwrap();
+        let (same_hour, _) = constrained.frame_with_parked_readers(1, 0, 299, bytes.unwrap() - 1).unwrap();
+        assert_eq!(first.tables, same_hour.tables);
+        assert_eq!(WATCHED.iter().filter(|&&table| constrained.reader(table).is_some()).count(), 1);
+        let target = block as u32;
+        let (resumed, reads) = crate::cells::count_reads(|| {
+            parked.frame_with_parked_readers(1, 0, target, 1024 * 1024).unwrap().0
+        });
+        let mut exact = Frames::new(&file, &WATCHED).unwrap();
+        exact.seek(0, target).unwrap();
+        assert_eq!(resumed.tables, exact.frame(1).unwrap().tables);
+        assert_eq!(reads[&TableId::Countries].opened, 1);
+    });
 }
 
 #[test]

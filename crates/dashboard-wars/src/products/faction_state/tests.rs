@@ -459,7 +459,7 @@ fn country_faction_goals_refreshes_when_scripted_goal_text_input_changes() {
 fn scripted_goal_refresh(fixture: &str, condition: &str, unrelated_tokens: bool) {
     use super::country_goals::CountryFactionGoals;
     use dashboard_base::{
-        products::at_hour::{AtHour, exact_panel, frame_panel},
+        products::{LoadContext, at_hour::{AtHour, exact_panel, frame_panel}},
         test_fixtures::{game, materialized_frame, played, source, source_with_content, streamed, visual_mods::Machine},
     };
     use replay_data::rows::{CountryRow, CountryWarRow, Recorded, ScriptFlagRow};
@@ -479,7 +479,8 @@ fn scripted_goal_refresh(fixture: &str, condition: &str, unrelated_tokens: bool)
         "\u{feff}l_english:\n mod_goal_name:0 \"Mod Goal\"\n mod_goal_desc:0 \"State: [ROOT.ModGoalPhrase]\"\n mod_phrase_on:0 \"Active\"\n mod_phrase_off:0 \"Idle\"\n".as_bytes(),
     );
 
-    let frames: Vec<_> = (100..=105)
+    let last = if unrelated_tokens { 106 } else { 105 };
+    let frames: Vec<_> = (100..=last)
         .map(|hour| {
             let mut f = source(1, hour, Some(100));
             set(&mut f, TableId::Countries, TableRows::Countries(vec![
@@ -498,7 +499,7 @@ fn scripted_goal_refresh(fixture: &str, condition: &str, unrelated_tokens: bool)
             ];
             if unrelated_tokens {
                 lexical.extend((101..=hour).map(|hour| LexicalTokenRow { token: hour as u32, literal: format!("unrelated_{hour}").into_bytes() }));
-                let enemies = if hour >= 103 { vec![8] } else { Vec::new() };
+                let enemies = if (103..106).contains(&hour) { vec![8] } else { Vec::new() };
                 set(&mut f, TableId::CountryWars, TableRows::CountryWars(vec![CountryWarRow {
                     country: 7, enemies_read: 1, enemies, ordered: Recorded::Value(None), can_occupy_non_war: 0,
                 }]));
@@ -513,50 +514,71 @@ fn scripted_goal_refresh(fixture: &str, condition: &str, unrelated_tokens: bool)
         .collect();
 
     let params = json!({"branchId": "1", "country": "AAA", "goals": "all"});
-    let counted = |replay: &replay::campaign::Replay, panel: &dashboard_follow::panel::AtHour| {
-        let stretches = Arc::new(Mutex::new(BTreeMap::<i32, u64>::new()));
+    let asked: super::country_goals::CountryFactionGoalsParams = serde_json::from_value(params.clone()).unwrap();
+    let counted = |replay: &replay::campaign::Replay, panel: &dashboard_follow::panel::AtHour, gap: Option<(Arc<dashboard_base::Source>, LoadContext)>| {
+        let stretches = Arc::new(Mutex::new(BTreeMap::<i32, (u64, u64)>::new()));
         let counts = Arc::clone(&stretches);
         let advance = Arc::clone(&panel.advance);
+        let mut gap_params = params.clone();
+        gap_params["hour"] = json!(last + 1);
         let tracked = dashboard_follow::panel::AtHour {
             advance: Arc::new(move |hour, seed, cancelled, step| {
+                if hour == last && let Some((source, load)) = &gap {
+                    let refusal = dashboard_base::products::at_hour::entry::<CountryFactionGoals>()
+                        .answer(source, gap_params.clone(), load, cancelled).unwrap_err();
+                    assert!(refusal.to_string().contains("hour is not recorded"));
+                }
                 let (reply, reads) = replay_recording::cells::count_reads(|| advance(hour, seed, cancelled, step));
-                *counts.lock().unwrap().entry(hour).or_default() += reads.get(&TableId::CountryWars).map_or(0, |read| read.stretches);
+                let mut counts = counts.lock().unwrap();
+                let (stretches, opened) = counts.entry(hour).or_default();
+                let wars = reads.get(&TableId::CountryWars).copied().unwrap_or_default();
+                *stretches += wars.stretches;
+                *opened += wars.opened;
                 reply
             }),
             cold: Arc::clone(&panel.cold),
             read: Arc::clone(&panel.read),
         };
-        let steps = played(replay, &tracked, 100, 105);
+        let steps = played(replay, &tracked, 100, last);
         let counts = std::mem::take(&mut *stretches.lock().unwrap());
         (steps, counts)
     };
     if unrelated_tokens {
         let (control, load) = source_with_content(frames.clone(), &machine.root);
         let panel = exact_panel::<CountryFactionGoals>(&control, &load, &params).unwrap();
-        let (_, reads) = counted(control.replay_ref(), panel.exact().unwrap());
-        assert!(reads.values().sum::<u64>() > 0);
+        let (_, reads) = counted(control.replay_ref(), panel.exact().unwrap(), None);
+        assert!(reads.values().map(|&(stretches, _)| stretches).sum::<u64>() > 0);
     }
-    let (source, load) = source_with_content(frames, &machine.root);
-    let source = Arc::new(source);
-    if unrelated_tokens {
-        let asked = serde_json::from_value(params.clone()).unwrap();
-        if let Some(pending) = CountryFactionGoals::PREPARE.unwrap()(&source, &asked, &load, 100).unwrap() {
-            pending.wait().unwrap();
+    let prepared = |frames| {
+        let (source, load) = source_with_content(frames, &machine.root);
+        let source = Arc::new(source);
+        if unrelated_tokens && let Some(pending) = CountryFactionGoals::PREPARE.unwrap()(&source, &asked, &load, 100).unwrap() {
+            pending.wait().unwrap()
         }
+        (source, load)
+    };
+    if unrelated_tokens {
+        let (warm, load) = prepared(frames.clone());
+        let panel = exact_panel::<CountryFactionGoals>(&warm, &load, &params).unwrap();
+        let (_, reads) = counted(warm.replay_ref(), panel.exact().unwrap(), None);
+        assert_eq!(reads[&last].1, 0, "the second change can reuse its parked readers");
     }
+    let (source, load) = prepared(frames);
     let panel = exact_panel::<CountryFactionGoals>(&source, &load, &params).unwrap();
     let exact = panel.exact().unwrap();
     let mut whole = frame_panel::<CountryFactionGoals>(&source, &load, &params).unwrap();
-    let (steps, reads) = counted(source.replay_ref(), exact);
+    let gap = unrelated_tokens.then(|| (Arc::clone(&source), LoadContext { content: load.content.clone() }));
+    let (steps, reads) = counted(source.replay_ref(), exact, gap);
     if unrelated_tokens {
-        assert_eq!(reads[&103], 0);
-        assert_eq!(reads.values().sum::<u64>(), 0);
+        assert_eq!(reads[&103].0, 0);
+        assert_eq!(reads.values().map(|&(stretches, _)| stretches).sum::<u64>(), 0);
+        assert!(reads[&last].1 > 0, "a gap request discards the parked world");
     }
     for step in &steps {
         let expected = streamed(&materialized_frame(&mut *whole, source.replay_ref(), 1, step.hour), step.fresh);
         assert_eq!(streamed(&step.value, step.fresh), expected, "scripted country-faction-goals at {}", step.hour);
         let desc = step.value.as_ref().as_ref().unwrap()["definitions"][0]["description"].as_str().unwrap_or_else(|| panic!("missing description: {:?}", step.value));
-        assert_eq!(desc, if step.hour >= 103 { "State: Active" } else { "State: Idle" });
+        assert_eq!(desc, if (103..106).contains(&step.hour) { "State: Active" } else { "State: Idle" });
         if matches!(step.hour, 101 | 102 | 104 | 105) {
             assert_eq!(step.product_calls, 0, "{fixture} quiet scripted hour {} should hold", step.hour);
         }

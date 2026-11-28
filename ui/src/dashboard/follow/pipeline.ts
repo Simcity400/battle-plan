@@ -458,7 +458,7 @@ export class Pipeline {
       const view = this.page.view(held.id), widget = this.widgets.get(held.id), shown = this.page.widgets.get(held.id);
       if (!widget || !shown) continue;
       const offset = shown.offset, clock = (hour: number) => hour - offset;
-      const name = held.widget, surface = widget.view === 'table' || widget.view === 'race' ? widget.view : 'page';
+      const name = held.widget, surface = widget.view === 'fields' || widget.view === 'panel' ? 'page' : widget.view;
       const answers = [...this.answered.get(held.id) ?? []];
       for (const [owner, answer] of answers) {
         const hour = clock(answer.hour), rows = answer.rows();

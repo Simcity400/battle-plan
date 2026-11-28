@@ -589,7 +589,13 @@ where P::Context: Sync, P::Params: Sync {
         let mut held = stream.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut count = 0;
         let result = engine_executable::executable_tables::scope(executable, || -> io::Result<_> {
-            let run = timeline.at(hour).ok_or_else(|| dashboard_core::refused(format!("{} hour is not recorded", P::TITLE)))?.run;
+            let stretch = timeline.at(hour);
+            if let Some(reset) = P::RESET_READERS
+                && (stretch.is_none() || step.is_none_or(|input| input.step.reset() || input.step.gap()))
+            {
+                reset(&context);
+            }
+            let run = stretch.ok_or_else(|| dashboard_core::refused(format!("{} hour is not recorded", P::TITLE)))?.run;
             let read_run = pool.pages.run_of(run).ok_or_else(|| dashboard_core::refused(format!("{} hour is in a run the recording cannot read", P::TITLE)))?;
             let mut input = Input { pool: &pool, run: read_run, hour, mode: capture_mode(&pool.pages)?, count: &mut count, step, placed: None, gap: false, exact: false };
             if let Some(state) = held.as_mut().filter(|s| s.frame.hour == hour && s.run == run && !s.rebuild) {

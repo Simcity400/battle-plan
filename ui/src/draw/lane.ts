@@ -183,6 +183,7 @@ export interface Painted {
   motion: boolean;
   repainted?: boolean;
   ephemeral?: boolean;
+  layoutHeld?: true;
   mode?: 'picture' | 'refused';
   reason?: string;
   nextChangeAt?: number;
@@ -249,6 +250,7 @@ export interface LaneHost<B extends Bitmap> {
 
 interface Sent {
   id: number; owner?: string; request: number; seek: number; ephemeral: boolean; pictures: Picture<Value>[]; h: number; c: number; lo: number; hi: number; binding: number;
+  layoutHeld?: true;
   contents: Record<string, string>; fieldKeys: string[]; surfaceCount: number; mode: Entry['mode']; reason?: string;
   open?: 'followed' | 'panel'; viewport?: InstalledViewport; inspect: string | null; hit?: Painted['hit']; supply: number;
   model: unknown; bindingSnapshot: Binding; subsSnapshot: readonly Sub[];
@@ -2880,7 +2882,7 @@ export class Lane<B extends { readonly width: number; close(): void }> {
     for (const wid of this.ephemeralWidgets) {
       const widget = this.widgets.get(wid);
       const active = widget?.inflight ?? widget?.installed;
-      if (active?.ephemeral && active.seek !== request.seek) candidates.add(wid);
+      if (active?.ephemeral && (active.seek !== request.seek || (active.layoutHeld && request.speed === 0))) candidates.add(wid);
     }
     for (const wid of this.inflightWidgets) {
       this.stats.visited++;
@@ -2982,10 +2984,11 @@ export class Lane<B extends { readonly width: number; close(): void }> {
       this.syncWindowTracking(widget);
       const shown = this.matches(widget.installed, selected, target, widget.binding.generation, widget.supply, key, route, request.seek);
       const slotDirty = restore || (!this.ownsPlayback(widget, request.seek, request.speed > 0) && this.isDirectSlotDirty(wid));
+      const refit = request.speed === 0 && (widget.inflight ?? widget.installed)?.layoutHeld;
       const parked = !refresh && !restore && this.matches(widget.parked, selected, target, widget.binding.generation, widget.supply, key, route, request.seek);
-      if (parked && !pause) return null;
+      if (parked && !pause && !refit) return null;
       const pending = widget.inflight && this.pageRequests - widget.inflight.request <= STALE && this.matches(widget.inflight, selected, target, widget.binding.generation, widget.supply, key, route, request.seek);
-      const unchanged = parked || (!refresh && (pending || (shown && !widget.motion)) && !widget.forceFull && !slotDirty);
+      const unchanged = !refit && (parked || (!refresh && (pending || (shown && !widget.motion)) && !widget.forceFull && !slotDirty));
       widget.inspect = key;
       if (key === null) this.inspectedWidgets.delete(wid); else this.inspectedWidgets.add(wid);
       if (unchanged && !pause) return null;
@@ -3061,6 +3064,7 @@ export class Lane<B extends { readonly width: number; close(): void }> {
         const restorePlayback = this.restorePlayback(widget, request);
         const slotDirty = restorePlayback || (!playbackOwnsPixels && this.isDirectSlotDirty(widget.id));
         const redate = !refresh && !motion && !widget.motion && !widget.forceFull && !slotDirty && widget.installed
+          && !(request.speed === 0 && widget.installed.layoutHeld)
           && this.canRedate(widget.installed, selected, widget.binding.generation, widget.supply, widget.inspect, request.seek) ? widget.installed : null;
         const pause = redate && candidate.pause ? 'only' : candidate.pause;
         const pushRedated = (base: Sent) => {
@@ -3403,7 +3407,7 @@ export class Lane<B extends { readonly width: number; close(): void }> {
     const sent: Sent = { id, ...(widget.binding.owner !== undefined ? { owner: widget.binding.owner } : {}), request: this.pageRequests, seek, ephemeral: base.ephemeral, pictures: selected.pictures, h: selected.h, c: selected.c, lo: selected.window[0], hi: selected.window[1],
       binding: widget.binding.generation, contents, fieldKeys: base.fieldKeys, surfaceCount: base.surfaceCount, mode: base.mode, reason: base.reason, open, ...(base.viewport ? { viewport: base.viewport } : {}), inspect: widget.inspect, hit: base.hit, supply: base.supply,
       model: base.model, bindingSnapshot: base.bindingSnapshot, subsSnapshot: base.subsSnapshot, ...(metadataOnly ? { metadataOnly: true } : {}),
-      ...(base.playbackUnavailable ? { playbackUnavailable: true } : {}) };
+      ...(base.playbackUnavailable ? { playbackUnavailable: true } : {}), ...(base.layoutHeld ? { layoutHeld: true } : {}) };
     widget.withdrawn = null;
     widget.sent = { ...contents };
     widget.inflight = sent;
@@ -3442,7 +3446,7 @@ export class Lane<B extends { readonly width: number; close(): void }> {
     const sent: Sent = { id, ...(widget.binding.owner !== undefined ? { owner: widget.binding.owner } : {}), request: this.pageRequests, seek, ephemeral: painted.ephemeral === true, pictures: selected.pictures, h: selected.h, c: selected.c, lo: selected.window[0], hi: selected.window[1],
       binding: widget.binding.generation, contents, fieldKeys, surfaceCount: painted.surfaces.length, mode, reason, open, ...(viewport ? { viewport } : {}), inspect: widget.inspect, hit: painted.hit, supply: widget.supply,
       model: widget.model, bindingSnapshot: widget.binding, subsSnapshot: widget.subs.map(id => this.subs.get(id)!), ...(staged ? { staged: true } : {}), ...(metadataOnly ? { metadataOnly: true } : {}),
-      ...(painted.playbackUnavailable ? { playbackUnavailable: true } : {}) };
+      ...(painted.playbackUnavailable ? { playbackUnavailable: true } : {}), ...(painted.layoutHeld ? { layoutHeld: true } : {}) };
     widget.withdrawn = null;
     widget.sent = { ...contents };
     widget.inflight = sent;

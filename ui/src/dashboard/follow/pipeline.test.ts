@@ -585,6 +585,14 @@ test('review 7 F: a pinned placement that shows an asked answer stays sampled wi
     const last = owned.slice(-2);
     assert.deepEqual(last.map(record => [record.owner, record.surface]).sort(), [[-1, 'table'], [-1002, 'table']],
       'review 8 5: a changed pinned answer is sampled at once, each component under its own owner and the active renderer, and only the departing one is removed');
+
+    await capturePictures(true);
+    const chart = pipeline.acquire('chart|0', { offset: 0, pin: 40 });
+    pipeline.present(chart, 'time-chart');
+    pipeline.audit(chart, -2, () => [{ row: 'GER', key: 'GER', value: '2' }]);
+    pipeline.answer(chart, -1003, { hour: 40, rows: () => [{ row: 'x', key: 'x', value: '2' }] });
+    const chartPictures = (await capturePictures(false) as typeof records).filter(record => record.t === 'picture' && record.placement === chart);
+    assert.deepEqual(chartPictures.slice(-2).map(record => [record.owner, record.surface]).sort(), [[-1003, 'time-chart'], [-2, 'time-chart']]);
   } finally { close(); }
 });
 

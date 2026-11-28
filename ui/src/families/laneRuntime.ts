@@ -61,6 +61,7 @@ export interface LanePrevious<TModel, TLayout> {
 
 export interface LaneStep<TModel, TLayout> {
   readonly previous: LanePrevious<TModel, TLayout> | null;
+  readonly previousLayout?: TLayout | null;
   readonly now: number;
   readonly speed: number;
 }
@@ -107,6 +108,8 @@ export interface LaneFamily<TBinding extends LaneBinding, TModel, TLayout> {
   redraw(model: TModel, hour: number): number;
   status(model: TModel): LaneStatus;
   readonly view: readonly (keyof TBinding & string)[];
+  readonly layoutTracksPlayback?: true;
+  layoutHeld?(layout: TLayout): boolean;
   readonly playback?: {
     enabled(binding: TBinding): boolean;
     supports(model: TModel, form: BarsPlaybackForm): boolean;
@@ -749,6 +752,11 @@ export function createLaneView<TBinding extends LaneBinding, TModel, TLayout>(
       const t0 = timed ? performance.now() : 0;
       const current = painting(input, binding);
       const continuity = follows(keep.painting, current);
+      const layoutTracksPlayback = family.layoutTracksPlayback === true;
+      const layoutContinues = layoutTracksPlayback && keep.painting !== null
+        && samePlacement(keep.painting, current);
+      const layoutSpeed = layoutTracksPlayback ? (current.pin === null ? input.speed : 0) : effectiveSpeed;
+      if (layoutTracksPlayback && !layoutContinues) keep.layout = null;
       keep.painting = current;
       if (continuity === 'cut') {
         const hadEphemeral = keep.motion || Number.isFinite(keep.expiry);
@@ -812,6 +820,7 @@ export function createLaneView<TBinding extends LaneBinding, TModel, TLayout>(
       const playbackUnavailable = animation?.unavailable(model) === true;
       const status = family.status(model);
       const settlePlayback = input.restorePlayback;
+      if (layoutTracksPlayback && layoutSpeed <= 0 && status !== 'picture') keep.layout = null;
       if (status === 'waiting') {
         resetMirror(keep);
         return WAITING;
@@ -826,9 +835,12 @@ export function createLaneView<TBinding extends LaneBinding, TModel, TLayout>(
       }
 
       const layoutKey = [model, drawn, surface.width, surface.height, ...viewKey(binding, ['theme', ...family.view])];
+      if (layoutTracksPlayback) layoutKey.push(layoutSpeed > 0, surface.dpr);
       if (!keep.layout || !sameKey(keep.layoutKey, layoutKey)) {
         const previous = continuity === 'continues' ? keep.drawn : null;
-        keep.layout = family.layout(model, binding, surface, theme, keep.ctx, drawn, { previous, now: effectiveNow, speed: effectiveSpeed });
+        keep.layout = family.layout(model, binding, surface, theme, keep.ctx, drawn, {
+          previous, ...(layoutTracksPlayback ? { previousLayout: keep.layout } : {}), now: effectiveNow, speed: layoutSpeed,
+        });
         keep.layoutKey = layoutKey;
       }
       const layout = keep.layout;
@@ -1160,6 +1172,7 @@ export function createLaneView<TBinding extends LaneBinding, TModel, TLayout>(
         fields.phases = keep.phasesField;
       }
 
+      const layoutHeld = family.layoutHeld?.(layout) === true;
       return {
         ...(status === 'picture' ? { mode: 'picture' as const } : {}),
         ...nextChangeAt,
@@ -1172,7 +1185,8 @@ export function createLaneView<TBinding extends LaneBinding, TModel, TLayout>(
         ...(metadataOnly ? { playbackOwnsPixels: true } : {}),
         ...(playbackUnavailable ? { playbackUnavailable: true } : {}),
         repainted,
-        ...(keep.motion || Number.isFinite(keep.expiry) ? { ephemeral: true } : {}),
+        ...(keep.motion || Number.isFinite(keep.expiry) || (layoutTracksPlayback && current.pin === null) ? { ephemeral: true } : {}),
+        ...(layoutHeld ? { layoutHeld: true } : {}),
         hit: keep.hit,
       };
     },

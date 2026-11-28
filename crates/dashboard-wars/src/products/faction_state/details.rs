@@ -420,7 +420,7 @@ impl AtHour for FactionDetails {
 
 impl DetailContent {
     pub(super) fn with_scripted_playback(mut self, source: &Source, dates: &'static [DateSelection]) -> Self {
-        self.inputs = self.inputs.with_lexical(source).with_prepared_block_dates(source, dates);
+        self.inputs = self.inputs.with_lexical(source).with_prepared_block_dates(source, dates).with_retained_world(source);
         self
     }
 

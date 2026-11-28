@@ -1,7 +1,7 @@
 import { rankReading } from '../../charts/race/measureRaceData.ts';
 import { colour } from '../../charts/palette.ts';
 import type { BarsWidgetDeclaration } from '../../families/bars/declaration.ts';
-import type { BarsModel, BarsProjection, BarsSegment } from '../../families/bars/model.ts';
+import type { BarsModel, BarsPartReading, BarsProjection, BarsSegment } from '../../families/bars/model.ts';
 import {
   projectSeriesRace,
   seriesRaceSelection,
@@ -14,8 +14,8 @@ import {
 import type { BoundedReadView, FamilyPlanContext, SourcePlan } from '../../families/contract.ts';
 import { registerFamilyProjection } from '../../families/registry.ts';
 import type { TooltipListItem } from '../../families/host/tooltips.ts';
-import { knownValue, zeroValue } from '../../families/value.ts';
-import { formatScalar } from '../../families/valueFormat.ts';
+import { knownValue, notRecorded } from '../../families/value.ts';
+import { formatExactScalar } from '../../families/valueFormat.ts';
 import type { SeriesRankReply, SeriesRankRow } from '../../generated/dashboard';
 import { SCORE_LABELS, scorePart, type ScorePart } from './gameScoreData.ts';
 
@@ -31,31 +31,37 @@ const splits = (options: Pick<GameScoreRaceOptions, 'by' | 'split'>) => options.
 
 function splitParts(surface: string, reply: SeriesRankReply, row: SeriesRankRow): SeriesRaceParts {
   const items: TooltipListItem[] = [];
+  const partReadings: BarsPartReading[] = [];
   const known: { readonly part: typeof SPLIT_PARTS[number]; readonly color: string; readonly amount: number }[] = [];
   SPLIT_PARTS.forEach((part, at) => {
     const color = colour(surface, at);
     const reading = rankReading(reply, row, part);
     const decimals = reply.measures.find(measure => measure.name === part)?.decimals ?? 0;
+    const label = SCORE_LABELS[part];
     if (!reading?.run) {
-      items.push({ label: SCORE_LABELS[part], swatch: color, missingReason: reading?.missing ?? 'Not recorded at this hour' });
+      const missingReason = reading?.missing ?? 'Not recorded at this hour';
+      partReadings.push({ key: part, label, value: notRecorded(missingReason) });
+      items.push({ label, swatch: color, missingReason });
       return;
     }
-    const amount = Math.max(0, Number(reading.run.valueRaw) / 10 ** decimals);
-    items.push({ label: SCORE_LABELS[part], swatch: color, value: formatScalar(amount, { decimals: 0 }) });
-    known.push({ part, color, amount });
+    const raw = BigInt(reading.run.valueRaw);
+    const format = { decimals };
+    partReadings.push({ key: part, label, value: knownValue(raw), format });
+    items.push({ label, swatch: color, value: formatExactScalar(raw, format) });
+    known.push({ part, color, amount: Math.max(0, Number(raw) / 10 ** decimals) });
   });
   const sum = known.reduce((total, part) => total + part.amount, 0);
-  if (known.length < SPLIT_PARTS.length) return { items, segmentsIncomplete: true };
-  if (sum <= 0) return { items };
+  if (known.length < SPLIT_PARTS.length) return { items, partReadings, segmentsIncomplete: true };
+  if (sum <= 0) return { items, partReadings };
   const segments: BarsSegment[] = known.filter(part => part.amount > 0).map(part => ({
     key: part.part,
     label: SCORE_LABELS[part.part],
     share: part.amount / sum,
-    value: part.amount === 0 ? zeroValue() : knownValue(part.amount),
+    value: knownValue(part.amount),
     format: { decimals: 0 },
     color: part.color,
   }));
-  return { segments, items };
+  return { segments, items, partReadings };
 }
 
 export const gameScoreRaceProjection: BarsProjection<GameScoreRaceOptions> = registerFamilyProjection({

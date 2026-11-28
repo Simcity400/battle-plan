@@ -1,7 +1,7 @@
 use super::details::{self, DetailContent, FactionDetailParams, FactionDetailReply, FactionDetails};
 use super::goals::{self, FactionGoalDefinition};
 use dashboard_base::products::Country;
-use dashboard_base::{Source, products::{LoadContext, at_hour::{At, AtHour, DateSelection, Edits, Held, Owner, PrepareHour, Read, ReadDates, ReadsAt, field_columns, warnings_through}}};
+use dashboard_base::{Source, products::{LoadContext, at_hour::{At, AtHour, DateSelection, Edits, Held, Owner, PrepareHour, Read, ReadDates, ReadsAt, ScriptedInputs, field_columns, warnings_through}}};
 use dashboard_text::metadata::link_slot;
 use replay_data::rows::{CountryLinkRow, FactionMemberRow, ProvinceRow, TableId, mask, tables};
 use replay_frame::frame::DecodedFrame;
@@ -172,6 +172,8 @@ impl AtHour for CountryFactionGoals {
     const KEY: &'static str = "country-faction-goals";
     const TITLE: &'static str = "Country faction goals";
     const CONTENT_DEPENDENT: bool = true;
+    const RESET_READERS: Option<fn(&Self::Context)> = Some(|context| context.inputs().release_world());
+    const RELEASE_ON_GAP: Option<fn(&Source)> = Some(ScriptedInputs::release_world_for);
     const PREPARE: Option<PrepareHour<Self::Params>> = Some(|source, params, load, hour| {
         if load.content.is_none() { return Ok(None); }
         let branch = params.branch_id.parse().map_err(|_| dashboard_core::invalid("Invalid faction branch"))?;

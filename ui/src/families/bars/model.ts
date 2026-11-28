@@ -73,12 +73,15 @@ export function countryRowPresentation(
   };
 }
 
-export interface BarsSegment {
+export interface BarsPartReading {
   readonly key: string;
   readonly label: string;
-  readonly share: number;
   readonly value: Value;
   readonly format?: ValueFormat;
+}
+
+export interface BarsSegment extends BarsPartReading {
+  readonly share: number;
   readonly color: string;
   readonly hatched?: boolean;
   readonly inlineLabel?: string;
@@ -153,6 +156,7 @@ export interface BarsDataRow {
   readonly numeric?: number | null;
   readonly target?: BarsNeedTarget;
   readonly segments?: readonly BarsSegment[];
+  readonly partReadings?: readonly BarsPartReading[];
   readonly segmentsIncomplete?: true;
   readonly left?: BarsSideMeasure;
   readonly right?: BarsSideMeasure;
@@ -328,6 +332,7 @@ export function assertBarsModelValid(model: BarsModel, displayedHour: number): v
       || row.numeric !== undefined
       || row.target !== undefined
       || row.segments !== undefined
+      || row.partReadings !== undefined
       || row.left !== undefined
       || row.right !== undefined
       || row.readout !== undefined
@@ -358,6 +363,7 @@ export function assertBarsModelValid(model: BarsModel, displayedHour: number): v
         }
       }
     }
+    for (const part of row.partReadings ?? []) assertValue(part.value, `${prefix}.partReadings[${part.key}]`);
     if (row.pair) {
       assertValue(row.pair.topValue, `${prefix}.pair.top`);
       assertValue(row.pair.bottomValue, `${prefix}.pair.bottom`);
@@ -555,7 +561,12 @@ export function deriveBarsMirror(
       const rightName = barsLabelSpoken(item.rightSide.label);
       cells.push({ column: 'rightSide', spoken: `${rightName}: ${formatBarsValueField(item.rightSide.value).spoken}` });
     }
-    if (item.segments?.length) {
+    if (item.partReadings?.length) {
+      cells.push({
+        column: 'segments',
+        spoken: item.partReadings.map(part => `${part.label} ${formatBarsValueField(part).spoken}`).join(', '),
+      });
+    } else if (item.segments?.length) {
       cells.push({
         column: 'segments',
         spoken: item.segments.map(seg => `${seg.label} ${formatShare(seg.share)}`).join(', '),
@@ -612,6 +623,7 @@ export function deriveBarsAudit(
       cell(item.key, 'pairTop', canonicalAuditValue(item.pair.topValue));
       cell(item.key, 'pairBottom', canonicalAuditValue(item.pair.bottomValue));
     }
+    for (const part of item.partReadings ?? []) cell(item.key, `part:${part.key}`, canonicalAuditValue(part.value));
     if (item.segments?.length) {
       for (let s = 0; s < item.segments.length; s++) {
         const seg = item.segments[s]!;
