@@ -23,7 +23,7 @@ export interface SeriesRaceConfig {
   readonly measures?: readonly string[];
 }
 
-export interface SeriesRaceParts extends Pick<BarsDataRow, 'segments' | 'segmentsIncomplete'> {
+export interface SeriesRaceParts extends Pick<BarsDataRow, 'segments' | 'segmentsIncomplete' | 'partReadings'> {
   readonly items: readonly TooltipListItem[];
 }
 
@@ -100,7 +100,7 @@ function makeRow(readView: BoundedReadView, reply: SeriesRankReply, rankRow: Ser
       : formatted.kind === 'pending'
         ? { label: config.valueLabel, value: formatted.label }
         : { label: config.valueLabel, value: formatted.exact ?? formatted.text };
-  const parts = numeric !== null && config.parts ? config.parts(reply, rankRow) : null;
+  const parts = config.parts?.(reply, rankRow);
   const identity = readView.who('country', key);
   const tag = rankRow.unnamed ? null : identity.tag?.status === 'ready' ? identity.tag.value : typeof rankRow.country === 'string' ? rankRow.country : null;
   return {
@@ -112,8 +112,9 @@ function makeRow(readView: BoundedReadView, reply: SeriesRankReply, rankRow: Ser
     ...(pres.color ? { color: pres.color } : {}),
     value: { value, format: config.valueFormat, label: config.valueLabel },
     numeric,
-    ...(parts?.segments ? { segments: parts.segments } : {}),
+    ...(numeric !== null && parts?.segments ? { segments: parts.segments } : {}),
     ...(parts?.segmentsIncomplete ? { segmentsIncomplete: true } : {}),
+    ...(parts?.partReadings ? { partReadings: parts.partReadings } : {}),
     tooltip: {
       title: barsLabelText(pres.label),
       hour: readView.hour,
