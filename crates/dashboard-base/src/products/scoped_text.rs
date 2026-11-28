@@ -19,7 +19,7 @@ use dashboard_text::{
     },
     triggers::inputs::{Inputs, TableRead},
 };
-use replay::campaign::Replay;
+use replay::campaign::{HourCursor, Replay, SeekResult};
 use replay_columnar::{manifest::Status, store::{ColumnState, TableState, Value}};
 use replay_data::rows::TableId;
 use replay_frame::frame::{DecodedFrame, Metrics, NOT_SELECTED, READ_TIME_NOT_RECORDED, SharedView, TABLE_COUNT, TableView, not_selected};
@@ -39,6 +39,7 @@ const VARIABLE_READER_BYTES: usize = 32 * 1024 * 1024;
 const VARIABLES: TableId = TableId::ScriptVariableValues;
 const COMPANION_TABLES: [TableId; 3] = [TableId::Characters, TableId::States, TableId::CountryCharacters];
 const COMPANION_BYTES: usize = 8 * 1024 * 1024;
+const SCRIPTED_WORLD_BYTES: usize = 16 * 1024 * 1024;
 static UNSELECTED: LazyLock<[SharedView; TABLE_COUNT]> = LazyLock::new(|| {
     std::array::from_fn(|_| TableView::Unavailable { reason: NOT_SELECTED.into() }.into())
 });
@@ -54,6 +55,21 @@ impl Lexical {
         if let Some(anchors) = LexicalCursor::prepare(replay.recording(), run) {
             self.0.lock().unwrap_or_else(|e| e.into_inner()).use_anchors(anchors);
         }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ScriptedWorld(Option<HourCursor>);
+
+impl ScriptedWorld {
+    pub(crate) fn release(&mut self) { self.0 = None; }
+
+    pub(crate) fn read(&mut self, replay: &Arc<Replay>, branch: u64, hour: i32, tables: &[TableId]) -> io::Result<SeekResult> {
+        if self.0.as_ref().is_none_or(|cursor| cursor.tables() != tables || !Arc::ptr_eq(cursor.replay(), replay)) {
+            let bookkeeping = size_of::<Mutex<ScriptedWorld>>() - size_of::<HourCursor>() + 2 * size_of::<usize>();
+            self.0 = Some(HourCursor::bounded(Arc::clone(replay), tables, SCRIPTED_WORLD_BYTES - bookkeeping));
+        }
+        self.0.as_mut().expect("made").seek(branch, hour).inspect_err(|_| self.release())
     }
 }
 
