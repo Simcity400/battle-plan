@@ -494,6 +494,8 @@ fn designs_of(frame: &DecodedFrame, owner: Owner) -> io::Result<Vec<&replay_data
 }
 
 impl AtHour for EquipmentDesigns {
+    const PREPARE: Option<dashboard_base::products::at_hour::PrepareHour<Self::Params>> =
+        Some(|source, _, load, _| dashboard_base::products::artwork::prepare_artwork(source, load));
     const KEY: &'static str = "equipment-designs";
     const TITLE: &'static str = "Equipment designs";
     const CONTENT_DEPENDENT: bool = true;

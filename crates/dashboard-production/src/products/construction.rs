@@ -390,6 +390,15 @@ fn naming(source: &Source, catalogue: &Arc<Catalogue>) -> Arc<Mutex<Naming>> {
     naming
 }
 
+pub(crate) fn prepare_naming(
+    source: &Arc<Source>, load: &LoadContext,
+) -> io::Result<Option<Arc<dashboard_base::products::read_ahead::Preparation>>> {
+    dashboard_base::products::artwork::prepare_artwork_for::<Naming>(source, load, |source, catalogue| {
+        catalogue::prepare_sprite_renderer(catalogue);
+        drop(naming(source, catalogue));
+    })
+}
+
 struct LineSprite {
     sprite: content_reader_gfx::gfx::SpriteType,
     frame: i32,

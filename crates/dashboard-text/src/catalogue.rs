@@ -1392,6 +1392,20 @@ pub fn sprite_frame_png(
     cache.get(sprite_image_key(sprite, decode, frame, max_edge), render)
 }
 
+pub fn prepare_sprite_renderer(catalogue: &Catalogue) {
+    let prepare = |catalogue: &Catalogue| {
+        for force_pow2_textures in [false, true] {
+            let _ = shader_pipeline::artwork::prepare_sprite(
+                catalogue.content.layers.presentation(), Plain::default().effect(), Decode { force_pow2_textures },
+            );
+        }
+    };
+    prepare(catalogue);
+    if let Some(recorded) = catalogue.recorded() {
+        prepare(recorded);
+    }
+}
+
 fn strip_frame(sprite: &content_reader_gfx::gfx::SpriteType, frame: u32) -> bool {
     use content_reader_gui::gui::native::sprites::SpriteKind;
     match &sprite.facts.kind {

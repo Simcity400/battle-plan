@@ -603,6 +603,10 @@ impl Source {
     }
 
     pub fn resolve(&self, content: &mut ContentOptions) {
+        self.resolve_with(content, |options| self.content(options));
+    }
+
+    fn resolve_with(&self, content: &mut ContentOptions, recorded: impl FnOnce(&ResolveOptions) -> io::Result<Arc<ResolvedContent>>) {
         if !content.presentation.shows_mods() {
             return;
         }
@@ -611,7 +615,7 @@ impl Source {
             .binding()
             .mount
             .get_or_mount(admitted.cancel(), || {
-                let recorded = self.content(&content.options)?;
+                let recorded = recorded(&content.options)?;
                 Presented::mount(
                     &recorded,
                     &content.options,
@@ -640,24 +644,27 @@ impl Source {
     }
 
     pub fn resolve_bound(&self, content: &mut ContentOptions) {
-        if self.bound_content(&content.options).is_some() && self.still_admitted(content) {
-            self.resolve(content);
+        if let Some(recorded) = self.bound_content(&content.options) && self.still_admitted(content) {
+            self.resolve_with(content, |_| Ok(recorded));
         }
     }
 
     pub fn bound_presented_for(&self, content: &ContentOptions) -> Option<Arc<Presented>> {
-        self.bound_content(&content.options)?;
+        let recorded = self.bound_content(&content.options)?;
         if !self.still_admitted(content) {
             return None;
         }
         if content.presentation.shows_mods() {
             return content.presentation.mount()?.ok();
         }
-        self.recorded_presented(&content.options).ok()
+        self.recorded_presented_with(&content.options, recorded).ok()
     }
 
     pub fn recorded_presented(&self, options: &ResolveOptions) -> io::Result<Arc<Presented>> {
-        let recorded = self.content(options)?;
+        self.recorded_presented_with(options, self.content(options)?)
+    }
+
+    fn recorded_presented_with(&self, options: &ResolveOptions, recorded: Arc<ResolvedContent>) -> io::Result<Arc<Presented>> {
         let state = self.state::<RecordedMount>();
         let mut kept = state.lock().unwrap_or_else(|error| error.into_inner());
         if let Some((content, presented)) = &kept.0

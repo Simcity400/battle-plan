@@ -164,6 +164,15 @@ pub fn warm() {
         .spawn_carried(|| drop(renderer()));
 }
 
+pub fn prepare_sprite(layers: &ResolvedLayers, effect: &[u8], decode: Decode) -> Result<(), String> {
+    renderer()?;
+    let variant = variant(layers, effect, &[], decode)?;
+    let effect = renderer_for(layers)?.effect(variant);
+    let index = effect.select("Up")?.ok_or("missing Up technique")?.index;
+    effect.compiled(index)?;
+    Ok(())
+}
+
 fn renderer() -> Result<&'static Mutex<Renderer>, String> {
     RENDERER
         .get_or_init(|| Renderer::new().map(Mutex::new))
