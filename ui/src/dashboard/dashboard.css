@@ -72,7 +72,7 @@
 .header-timeline::-webkit-slider-thumb { appearance: none; width: 14px; height: 14px; margin-top: -5px; opacity: 0; }
 .header-timeline:focus-visible { outline: none; }
 .header-timeline:disabled { cursor: default; }
-.timeline-progress { position: absolute; inset: 0; pointer-events: none; }
+.timeline-progress { position: absolute; inset: 0; pointer-events: none; contain: layout style; }
 .timeline-fill { position: absolute; left: 0; right: 0; top: 7px; height: 4px; border-radius: 4px; background: var(--accent); transform-origin: left; transform: scaleX(0); will-change: transform; }
 .timeline-knob { position: absolute; left: 7px; right: 7px; top: 0; bottom: 0; transform: translateX(-100%); will-change: transform; }
 .timeline-knob::after { content: ''; position: absolute; top: 2px; right: -7px; width: 14px; height: 14px; border-radius: 50%; background: var(--ink-light);
@@ -295,7 +295,7 @@ button.dash-time-chip:hover, button.dash-time-chip[aria-expanded='true'] { backg
 .dash-time-dot { position: relative; isolation: isolate; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
 .dash-time-dot.is-playing::after {
   content: ''; position: absolute; inset: -5px; z-index: -1; border-radius: 50%; background: var(--accent); opacity: 0;
-  animation: live-pulse 1.8s var(--ease) infinite;
+  animation: live-pulse 1.8s var(--ease) infinite; contain: style;
 }
 [data-motion='reduced'] .dash-time-dot.is-playing::after { content: none; }
 :is(.dash-widget, .dash-widget-prepared)[data-offscreen] :is(.dash-time-dot.is-playing, .skeleton)::after { animation: none; }
