@@ -44,7 +44,6 @@ export interface FamilyTableBinding<TOptions = unknown> extends LaneBinding<TOpt
 }
 
 const TEXT_SAMPLE_ROWS = 40;
-const shapes = new WeakMap<TableModel, TableShape>();
 
 interface TableShape {
   readonly model: TableModel;
@@ -52,6 +51,9 @@ interface TableShape {
   readonly settings: TableSettings;
   readonly expanded: unknown;
   readonly width: number;
+  readonly height: number;
+  readonly dpr: number;
+  readonly playing: boolean;
   readonly theme: FamilyTheme;
   readonly measureText: (text: string, font: string) => number;
   readonly flatRows: readonly FlatTableRow[];
@@ -68,6 +70,8 @@ interface TableShape {
   readonly rankMarkersOn: boolean;
   readonly rankWidth: number;
   readonly widthKey: string;
+  readonly samples: Record<string, string[]>;
+  readonly measuredWidths: Record<string, number>;
   readonly fixedWidths: Record<string, number>;
   readonly allLayouts: FamilyColumnLayout[];
   readonly columns: FamilyTableLayout;
@@ -183,16 +187,6 @@ function flagCounts(columns: readonly { readonly key: string; readonly display?:
   return counts;
 }
 
-function sampleSignature(samples: Record<string, string[]>): string {
-  let sig = '';
-  for (const [key, list] of Object.entries(samples)) {
-    let longest = 0;
-    for (const text of list) if (text.length > longest) longest = text.length;
-    sig += `${key}:${longest}|`;
-  }
-  return sig;
-}
-
 interface MeasuredRow {
   readonly key: string;
   readonly height: number;
@@ -243,17 +237,30 @@ function rememberHeights(
   return memory;
 }
 
-function shapeOf(model: TableModel, binding: FamilyTableBinding, theme: FamilyTheme, width: number, measure: OffscreenCanvasRenderingContext2D, step: LaneStep<TableModel, TableLayout>): TableShape {
-  const prev = step.previous?.layout.shape ?? null;
+function holdColumnWidths(measured: Record<string, number>, previous: Record<string, number>): Record<string, number> {
+  let held = previous;
+  for (const key of Object.keys(measured)) {
+    const width = measured[key]!;
+    if (width <= previous[key]!) continue;
+    if (held === previous) held = { ...previous };
+    held[key] = width;
+  }
+  return held;
+}
+
+function shapeOf(model: TableModel, binding: FamilyTableBinding, theme: FamilyTheme, surface: Surface, measure: OffscreenCanvasRenderingContext2D, step: LaneStep<TableModel, TableLayout>): TableShape {
+  const prev = step.previousLayout?.shape ?? null;
+  const { width, height, dpr } = surface;
+  const playing = step.speed > 0;
   const settings = binding.settings;
   const expanded = binding.expanded;
-  const held = shapes.get(model);
-  if (held && held.options === binding.options && held.settings === settings && held.expanded === expanded && held.width === width && held.theme === theme) return held;
+  const sameSurface = prev !== null && prev.width === width && prev.height === height && prev.dpr === dpr && prev.theme === theme;
+  if (prev && prev.model === model && prev.options === binding.options && prev.settings === settings && prev.expanded === expanded && sameSurface && prev.playing === playing) return prev;
   const sortSig = `${settings.sort.column}\u0000${settings.sort.direction}`;
   const sameSettings = prev !== null && (prev.settings === settings || sameFieldValue(prev.settings, settings));
   const sameExpanded = prev !== null && (prev.expanded === expanded || sameFieldValue(prev.expanded, expanded));
   const sameView = sameSettings && sameExpanded && (prev.options === binding.options || sameFieldValue(prev.options, binding.options));
-  const inc = sameView && prev.model !== model && model.changedKeys !== undefined && !prev.hasGroups && !prev.panes && model.panes === undefined
+  const inc = sameView && step.previous?.layout.shape === prev && prev.model !== model && model.changedKeys !== undefined && !prev.hasGroups && !prev.panes && model.panes === undefined
     ? resolveTableRowsIncremental(prev.model, prev.flatRows, prev.rowIndex, model, settings)
     : null;
   const rowHeightMode = model.rowHeightMode ?? 'standard';
@@ -305,12 +312,16 @@ function shapeOf(model: TableModel, binding: FamilyTableBinding, theme: FamilyTh
   const baseCols = buildColumnLayouts(model.columns, settings);
   const samples = textSamples(baseCols, flatRows);
   const flags = flagCounts(baseCols, flatRows);
-  const widthKey = `${widthConfigOf(model.columns, settings, theme, model.hideHeader === true)}${sampleSignature(samples)}${JSON.stringify(flags)}`;
+  const widthKey = `${widthConfigOf(model.columns, settings, theme, model.hideHeader === true)}${JSON.stringify(flags)}`;
   const measureText = canvasMeasureText(measure);
-  const fixedWidths = prev && prev.widthKey === widthKey
-    ? prev.fixedWidths
+  const sameColumns = prev !== null && sameFieldValue(prev.model.columns, model.columns);
+  const measuredWidths = prev && sameColumns && prev.widthKey === widthKey && sameFieldValue(prev.samples, samples)
+    ? prev.measuredWidths
     : measureFixedColumnWidths(baseCols, settings, theme, measureText, samples, { hideHeader: model.hideHeader === true, flags });
-  const allLayouts = prev && sameSettings && prev.fixedWidths === fixedWidths && sameFieldValue(prev.model.columns, model.columns)
+  const fixedWidths = prev && playing && sameView && sameSurface && sameColumns && prev.model.hideHeader === model.hideHeader
+      && (prev.paneGeom?.width ?? prev.width) === layoutWidth
+    ? holdColumnWidths(measuredWidths, prev.fixedWidths) : measuredWidths;
+  const allLayouts = prev && sameSettings && prev.fixedWidths === fixedWidths && sameColumns
     ? prev.allLayouts : buildColumnLayouts(model.columns, settings, fixedWidths);
   const columns = prev && prev.allLayouts === allLayouts && (prev.paneGeom?.width ?? prev.width) === layoutWidth &&
     prev.rankShown === rankShown && prev.rankWidth === rankWidth && prev.model.rhythm === model.rhythm
@@ -336,21 +347,20 @@ function shapeOf(model: TableModel, binding: FamilyTableBinding, theme: FamilyTh
   const dataKeys = flatRows.filter(item => item.kind === 'data').map(item => item.key);
   const treeLevels = inc && prev ? prev.treeLevels : panes ? panes.map(pane => treeLevelsOf(pane.rows)) : treeLevelsOf(flatRows);
   const shape: TableShape = {
-    model, options: binding.options, settings, expanded, width, theme, measureText,
+    model, options: binding.options, settings, expanded, width, height, dpr, playing, theme, measureText,
     flatRows, rowIndex, hasGroups, incremental: inc !== null,
     treeLevels, hasTree: inc === null && (typeof treeLevels === 'number' ? treeLevels !== 0 : treeLevels.some(levels => levels !== 0)),
     panes, paneGeom, paneSpans: panes ? combinedPaneGeometry(panes) : null, paneStarts, rankShown, rankMarkersOn, rankWidth,
-    widthKey, fixedWidths, allLayouts, columns, rowHeightMode, rowHeight, rowGeom, variableHeightCount,
+    widthKey, samples, measuredWidths, fixedWidths, allLayouts, columns, rowHeightMode, rowHeight, rowGeom, variableHeightCount,
     windowOffset, totalCount, totalHeight, extents, maxima, maximaCols,
     rowAuditCache: inc && prev ? prev.rowAuditCache : new WeakMap(),
     sortSig, orderKeys: dataKeys,
   };
-  shapes.set(model, shape);
   return shape;
 }
 
 function layoutTable(model: TableModel, binding: FamilyTableBinding, surface: Surface, theme: FamilyTheme, measure: OffscreenCanvasRenderingContext2D, _hour: number, step: LaneStep<TableModel, TableLayout>): TableLayout {
-  const shape = shapeOf(model, binding, theme, surface.width, measure, step);
+  const shape = shapeOf(model, binding, theme, surface, measure, step);
   const { panes, rowGeom, rowHeight, flatRows } = shape;
   const windowTop = panes ? 0 : extentTop(shape.extents, rowHeight, shape.windowOffset);
   const localScrollTop = Math.max(0, binding.scrollTop - windowTop);
@@ -877,6 +887,11 @@ export const tableLane: LaneFamily<FamilyTableBinding, TableModel, TableLayout> 
     return handled ? 'picture' : 'scene';
   },
   view: ['settings', 'expanded', 'scrollTop', 'scrollLeft', 'focusedKey', 'reducedMotion'],
+  layoutTracksPlayback: true,
+  layoutHeld({ shape }) {
+    return shape.fixedWidths !== shape.measuredWidths
+      && Object.keys(shape.fixedWidths).some(key => shape.fixedWidths[key] !== shape.measuredWidths[key]);
+  },
   layout: layoutTable,
   onSpeed(layout, speed, continuity) {
     const mm = modelMotions.get(layout.shape.model);

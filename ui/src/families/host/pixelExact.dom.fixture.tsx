@@ -523,6 +523,40 @@ function hideCanvases(hidden: boolean) {
 
 let root: ReturnType<typeof createRoot> | null = null;
 
+function pausedTableFit() {
+  applyAppearance(document.documentElement, DEFAULT_APPEARANCE, resolveAppearance(DEFAULT_APPEARANCE, true, false));
+  const theme = readFamilyTheme()!;
+  const surface = { width: 600, height: 160, dpr: window.devicePixelRatio };
+  const lane = createLaneView(tableLane, () => {});
+  const state = new Map<string, unknown>();
+  let revision = 0;
+  const picture = (target: Map<string, unknown>, hour: number, speed: number, name: string) => {
+    const painted = lane.paint({
+      widget: 1, subs: [], pictures: [], hour, speed, seek: 0, inspect: null, now: 0,
+      binding: { generation: 1, surfaces: [surface], offset: 0, pin: null },
+      model: {
+        kind: tableProjection.kind, family: 'table', theme, settings: tableSettings,
+        sources: {}, options: {}, staticPanels: { main: { rows: [{ id: 'C0', name, factories: 40, divisions: 7 }] } },
+        revisions: { sources: 1, options: 1, settings: 1, theme: 1, staticPanels: ++revision },
+        width: surface.width, height: surface.height, scrollTop: 0, scrollLeft: 0, reducedMotion: true,
+      },
+    }, target, () => String(revision));
+    const canvas = painted.surfaces[0]?.source;
+    if (!(canvas instanceof OffscreenCanvas)) throw new Error('The table did not paint');
+    return canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height).data;
+  };
+  const short = 'i'.repeat(18);
+  const corrected = 'W'.repeat(short.length);
+  const baseline = picture(new Map(), 2, 0, short);
+  picture(state, 1, 24, 'A country name with enough text to widen the fitted column');
+  const playing = picture(state, 2, 24, short);
+  const paused = picture(state, 2, 0, short);
+  const correction = picture(state, 2, 0, corrected);
+  const correctedBaseline = picture(new Map(), 2, 0, corrected);
+  const differences = (data: Uint8ClampedArray, exact = baseline) => exact.reduce((count, pixel, i) => count + Number(pixel !== data[i]), 0);
+  return { playing: differences(playing), paused: differences(paused), correction: differences(correction, correctedBaseline) };
+}
+
 function pausedFuelReadout(width: number, names = ['Expeditionary Infantry Command', 'Fleet'],
   amounts = [['100000000', '90000000'], ['1000000000', '1000000000']], capture = false) {
   const dpr = window.devicePixelRatio;
@@ -597,6 +631,7 @@ function pausedFuelReadout(width: number, names = ['Expeditionary Infantry Comma
 
 const api = {
   pausedFuelReadout,
+  pausedTableFit,
   async mount(motion = false): Promise<{ readonly settled: boolean; readonly pending: readonly string[]; readonly dpr: number }> {
     applyAppearance(document.documentElement, DEFAULT_APPEARANCE, resolveAppearance(DEFAULT_APPEARANCE, true, false));
     await document.fonts.ready;
