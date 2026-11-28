@@ -813,7 +813,7 @@ impl<B: Build> crate::layers::Layer for Whole<B> {
         }
         let hour = mirrors.get(TableId::Clock).and_then(|clock| clock.head());
         self.applied = hour;
-        if let Some(hour) = hour
+        if settling.waits() && let Some(hour) = hour
             && self.window.is_some()
         {
             let waiting = match () {

@@ -4,7 +4,7 @@ mod store;
 
 pub use maker::PlanRows;
 
-use viewer_layer_core::{layers::{Carried, Change, Settling, Due, Fed, Gpu, Inputs, Layer, List, Num, Published, Text, Upstream, View}, owned::{Delta, Shape, Standing, Tables}};
+use viewer_layer_core::{layers::{Carried, Change, Settling, Due, Fed, Gpu, Inputs, Layer, List, Num, Published, Retirement, RetirementFlag, Text, Upstream, View}, owned::{Delta, Shape, Standing, Tables}};
 use super::rails::Rails;
 use viewer_layer_core::playhead_host::mirror::{Cell, Mirror, Mirrors};
 use maker::{Made, Maker, Stats};
@@ -486,6 +486,7 @@ fn run(jobs: Receiver<Job>, out: landed::Sender<Product>, due: Due) {
 }
 
 pub struct Trains {
+    retiring: RetirementFlag,
     content: Arc<dyn Yard>,
     columns: Option<Columns>,
     ours: Option<u32>,
@@ -517,6 +518,7 @@ pub struct Trains {
 impl Trains {
     pub fn new(content: Arc<dyn Yard>, ours: Option<u32>) -> Self {
         Self {
+            retiring: RetirementFlag::default(),
             content,
             columns: None,
             ours,
@@ -679,14 +681,17 @@ impl Trains {
         self.send(Job::Rails { epoch: self.epoch, forget });
     }
 
-    fn exchange(&mut self, wait: bool) {
+    fn exchange(&mut self, wait: bool) -> io::Result<()> {
         let deadline = Instant::now() + WAIT;
         loop {
             let waiting = wait && !self.fed.arrived();
             let Some((_, made)) = &self.worker else { break };
             let out = if waiting {
-                match made.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                self.retiring.check()?;
+                let left = deadline.saturating_duration_since(Instant::now());
+                match made.recv_timeout(left.min(RetirementFlag::POLL)) {
                     Ok(out) => Some(out),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) if left > RetirementFlag::POLL => continue,
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                         self.stalled = Some(self.owed());
                         break;
@@ -711,6 +716,7 @@ impl Trains {
         for product in due {
             self.home(product);
         }
+        Ok(())
     }
 
     fn home(&mut self, product: Product) {
@@ -750,6 +756,10 @@ impl Trains {
 }
 
 impl Layer for Trains {
+    fn retirement(&self) -> Option<Retirement> {
+        Some(self.retiring.handle())
+    }
+
     fn held_viewer(&self) -> Option<u32> {
         self.ours().filter(|_| self.shown())
     }
@@ -853,7 +863,7 @@ impl Layer for Trains {
         }
         self.fed.compose(mirrors.get(TableId::Countries).and_then(Mirror::head));
         self.send(Job::Reset { epoch: self.epoch, work: Box::new(work), stamp: None });
-        self.exchange(true);
+        self.exchange(true)?;
         if let Some(owed) = self.stalled.take() {
             return Err(io::Error::other(format!("The trains' first plan did not come within {} s: {owed}", WAIT.as_secs())));
         }
@@ -900,13 +910,13 @@ impl Layer for Trains {
         self.send(Job::Restart { epoch: self.epoch, mirrors: Box::new(held), stamp });
     }
 
-    fn settle_with(&mut self, mirrors: &Mirrors, upstream: &Upstream<'_>, _settling: Settling) -> io::Result<()> {
+    fn settle_with(&mut self, mirrors: &Mirrors, upstream: &Upstream<'_>, settling: Settling) -> io::Result<()> {
         self.frame += 1;
         self.fed.publish();
         if !self.shown {
             if self.worker.is_some() || self.plan.counts() != [0; 3] {
                 let (stats, frame, refused) = (self.stats, self.frame, self.refused.take());
-                *self = Self { stats, frame, refused, ..self.fresh() };
+                *self = Self { stats, frame, refused, retiring: self.retiring.clone(), ..self.fresh() };
             }
             return Ok(());
         }
@@ -914,7 +924,7 @@ impl Layer for Trains {
             return self.compose_with(mirrors, upstream);
         }
         self.forward_redraws(upstream);
-        self.exchange(true);
+        self.exchange(settling.waits())?;
         if let Some(owed) = self.stalled.take() {
             return Err(io::Error::other(format!("The trains' plan of the hour applied did not come within {} s: {owed}", WAIT.as_secs())));
         }

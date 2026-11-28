@@ -154,28 +154,22 @@ impl Rate {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Settling {
-    Step { late: bool },
+    Live,
+    Still,
     Whole,
 }
 
 impl Settling {
     pub fn step() -> Self {
-        Self::Step { late: false }
+        Self::Live
     }
 
     pub fn still() -> Self {
-        Self::Step { late: true }
-    }
-
-    pub fn behind_bound(self, behind: u32, bound: u32) -> Self {
-        match self {
-            Self::Whole => Self::Whole,
-            Self::Step { late } => Self::Step { late: late || behind >= bound },
-        }
+        Self::Still
     }
 
     pub fn waits(self) -> bool {
-        !matches!(self, Self::Step { late: false })
+        self != Self::Live
     }
 
     pub fn waiting(self, whole: std::time::Duration) -> std::time::Duration {
@@ -193,7 +187,7 @@ pub fn drawn_layer<'a, T: 'static>(side: &'a crate::playhead_host::MapSide<impl 
 
 pub type Retirement = Box<dyn FnOnce() + Send>;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct RetirementFlag(Arc<AtomicBool>);
 
 impl RetirementFlag {
@@ -206,6 +200,21 @@ impl RetirementFlag {
 
     pub fn requested(&self) -> bool {
         self.0.load(Ordering::Acquire)
+    }
+
+    pub fn check(&self) -> io::Result<()> {
+        if self.requested() { Err(io::Error::from(io::ErrorKind::Interrupted)) } else { Ok(()) }
+    }
+
+    pub fn receive<T>(&self, receiver: &viewer_runtime::landed::Receiver<T>) -> io::Result<Option<viewer_runtime::landed::Landed<T>>> {
+        loop {
+            self.check()?;
+            match receiver.recv_timeout(Self::POLL) {
+                Ok(value) => return Ok(Some(value)),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(None),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
     }
 }
 

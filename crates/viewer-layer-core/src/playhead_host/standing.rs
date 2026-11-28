@@ -1,4 +1,4 @@
-use crate::layers::{BOUND, Published};
+use crate::layers::{BOUND, Published, Settling};
 use replay_data::Hour;
 use std::{collections::VecDeque, io, time::Instant};
 
@@ -16,6 +16,9 @@ struct Standing {
     stood: u64,
     held: u64,
     worst: u32,
+    live_settles: u64,
+    live_yields: u64,
+    behind_hours: Vec<f64>,
     behind_publications: Vec<u32>,
     behind_ms: Vec<f64>,
 }
@@ -66,7 +69,8 @@ impl Standings {
         (self.hour, self.stopped) = (hour, if moved { 0 } else { self.stopped.saturating_add(1) });
     }
 
-    pub fn behind(&self, at: usize) -> u32 {
+    #[cfg(test)]
+    fn behind(&self, at: usize) -> u32 {
         self.layers.get(at).map_or(0, |layer| layer.behind)
     }
 
@@ -74,15 +78,23 @@ impl Standings {
         self.stopped > STOPPED
     }
 
-    pub fn settled(&mut self, at: usize, name: &'static str, published: Published, now: Instant, bound: u32) -> io::Result<()> {
+    pub fn settled(&mut self, at: usize, name: &'static str, published: Published, now: Instant, bound: u32, settling: Settling) -> io::Result<()> {
         if at >= self.layers.len() {
             self.layers.resize_with(at + 1, Standing::default);
         }
+        let live = !settling.waits() && self.hour.is_some();
+        self.layers[at].live_settles += u64::from(live);
         let (stands, product) = match published {
             Published::Current => (self.hour, false),
             Published::At(hour) | Published::Cadence(hour) => (Some(hour), true),
             Published::Nothing => {
-                self.layers[at].behind = 0;
+                let layer = &mut self.layers[at];
+                layer.behind = 0;
+                if live {
+                    layer.live_yields += 1;
+                    viewer_runtime::view_record::add("live layer settlements behind", name, 1);
+                    viewer_runtime::view_record::add("live layers without a product", name, 1);
+                }
                 return Ok(());
             }
         };
@@ -90,6 +102,15 @@ impl Standings {
         let record = viewer_runtime::view_record::on();
         let (check, hour) = (self.check || (bound != BOUND && self.check_rates), self.hour);
         let layer = &mut self.layers[at];
+        if live && let Some((head, stands)) = hour.zip(stands).filter(|(head, stands)| head > stands) {
+            layer.live_yields += 1;
+            if record {
+                let hours = head.abs_diff(stands);
+                layer.behind_hours.push(f64::from(hours));
+                viewer_runtime::view_record::add("live layer settlements behind", name, 1);
+                viewer_runtime::view_record::set("live layer hours behind", name, u64::from(hours));
+            }
+        }
         if let (Some(product_at), Some(stands)) = (layer.at, stands)
             && stands < product_at
         {
@@ -173,15 +194,19 @@ impl Standings {
             .layers
             .iter()
             .enumerate()
-            .filter(|(_, layer)| layer.publications > 0)
+            .filter(|(_, layer)| layer.publications > 0 || layer.live_yields > 0)
             .map(|(at, layer)| {
                 let mut behind: Vec<f64> = layer.behind_publications.iter().map(|&behind| f64::from(behind)).collect();
                 let mut ms = layer.behind_ms.clone();
+                let mut hours = layer.behind_hours.clone();
                 json!({
                     "name": names.get(at).copied().unwrap_or("?"),
                     "publications": layer.publications,
                     "publications_behind": layer.stood,
-                    "share_behind": layer.stood as f64 / layer.publications as f64,
+                    "share_behind": layer.stood as f64 / layer.publications.max(1) as f64,
+                    "live_settles": layer.live_settles,
+                    "live_settles_behind": layer.live_yields,
+                    "live_hours_behind": distribution(&mut hours),
                     "held": layer.held,
                     "worst_publications_behind": layer.worst,
                     "fell_without_a_product_going_back": layer.fell,
@@ -213,55 +238,41 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
-    fn a_publication_waits_for_nothing_until_a_product_stands_at_the_bound() {
-        for behind in 0..BOUND {
-            assert_eq!(Settling::step().behind_bound(behind, BOUND), Settling::Step { late: false }, "{behind} publications behind is inside the bound");
-            assert!(Settling::step().behind_bound(behind, BOUND).waiting(Duration::from_secs(5)).is_zero());
-        }
-        assert_eq!(Settling::step().behind_bound(BOUND, BOUND), Settling::Step { late: true }, "at the bound the publication waits for it");
-        assert!(Settling::step().behind_bound(BOUND, BOUND).waits());
-        assert!(!Settling::step().behind_bound(BOUND, BOUND).strict(), "a product at the bound is waited for, not refused by name");
-        assert_eq!(Settling::Whole.behind_bound(0, BOUND), Settling::Whole, "a whole settle waits whatever stands where");
-        assert!(Settling::Whole.waits() && Settling::Whole.strict());
-        for behind in 0..=BOUND {
-            assert_eq!(Settling::still().behind_bound(behind, BOUND), Settling::Step { late: true }, "{behind} behind, the head standing still");
-        }
+    fn only_paused_and_whole_settles_wait() {
+        assert!(Settling::step().waiting(Duration::from_secs(5)).is_zero());
         assert!(Settling::still().waits() && !Settling::still().strict());
+        assert!(Settling::Whole.waits() && Settling::Whole.strict());
     }
 
     #[test]
-    fn a_product_that_stands_still_falls_a_publication_behind_a_publication_until_it_is_waited_for() {
+    fn a_held_product_stands_behind_until_it_catches_up() {
         let mut standings = Standings::new(1);
         let now = Instant::now();
         standings.step(Some(10), now);
-        standings.settled(0, "counters", Published::Current, now, BOUND).unwrap();
+        standings.settled(0, "counters", Published::Current, now, BOUND, Settling::step()).unwrap();
         assert_eq!(standings.behind(0), 0);
         for step in 1..=BOUND {
             standings.step(Some(10 + step as i32), now);
-            standings.settled(0, "counters", Published::At(10), now, BOUND).unwrap();
+            standings.settled(0, "counters", Published::At(10), now, BOUND, Settling::step()).unwrap();
             assert_eq!(standings.behind(0), step, "its product has stood at hour 10 for {step} publications");
         }
-        assert!(Settling::step().behind_bound(standings.behind(0), BOUND).waits(), "the bound is reached and the next publication waits for it");
+        assert_eq!(standings.layers[0].live_yields, u64::from(BOUND));
         standings.step(Some(11 + BOUND as i32), now);
-        standings.settled(0, "counters", Published::Current, now, BOUND).unwrap();
-        assert_eq!(standings.behind(0), 0, "waited for, it is current again");
+        standings.settled(0, "counters", Published::Current, now, BOUND, Settling::step()).unwrap();
+        assert_eq!(standings.behind(0), 0, "it is current again");
     }
 
     #[test]
-    fn a_rated_product_is_waited_for_at_its_rate_and_judged_by_it() {
+    fn a_rated_product_uses_its_own_bound() {
         let rate = Rate::a_second(4);
         let bound = rate.behind();
         assert!(bound > BOUND, "a rate of 4 a second covers more than one publication: {bound}");
-        for behind in 0..bound {
-            assert_eq!(Settling::step().behind_bound(behind, bound), Settling::Step { late: false }, "{behind} publications behind is inside its rate");
-        }
-        assert_eq!(Settling::step().behind_bound(bound, bound), Settling::Step { late: true }, "at its own bound the publication waits for it");
         let mut standings = Standings::new(1);
         standings.check_rates = true;
         let now = std::time::Instant::now();
         for at in 0..=bound as i32 + 1 {
             standings.step(Some(at), now);
-            let settled = standings.settled(0, "scripts at the head", Published::Cadence(0), now, bound);
+            let settled = standings.settled(0, "scripts at the head", Published::Cadence(0), now, bound, Settling::step());
             if at <= bound as i32 {
                 settled.expect("inside its rate");
             } else {
@@ -277,7 +288,7 @@ mod tests {
         let now = Instant::now();
         for at in 0..10 {
             standings.step(Some(at), now);
-            standings.settled(0, "units", Published::Nothing, now, BOUND).unwrap();
+            standings.settled(0, "units", Published::Nothing, now, BOUND, Settling::step()).unwrap();
             assert_eq!(standings.behind(0), 0);
         }
     }
@@ -289,7 +300,7 @@ mod tests {
         let now = Instant::now();
         for at in 0..=BOUND as i32 + 1 {
             standings.step(Some(at), now);
-            let settled = standings.settled(0, "sounds", Published::At(0), now, BOUND);
+            let settled = standings.settled(0, "sounds", Published::At(0), now, BOUND, Settling::step());
             if at <= BOUND as i32 {
                 settled.expect("inside the bound");
             } else {
@@ -300,9 +311,9 @@ mod tests {
         let mut standings = Standings::new(1);
         standings.check = true;
         standings.step(Some(5), now);
-        standings.settled(0, "ships", Published::At(5), now, BOUND).unwrap();
+        standings.settled(0, "ships", Published::At(5), now, BOUND, Settling::step()).unwrap();
         standings.step(Some(6), now);
-        let why = standings.settled(0, "ships", Published::At(4), now, BOUND).expect_err("backwards").to_string();
+        let why = standings.settled(0, "ships", Published::At(4), now, BOUND, Settling::step()).expect_err("backwards").to_string();
         assert!(why.contains("ships") && why.contains("went backwards"), "{why}");
     }
 
@@ -312,11 +323,11 @@ mod tests {
         standings.check = true;
         let now = Instant::now();
         standings.step(Some(20), now);
-        standings.settled(0, "ships", Published::Current, now, BOUND).expect("it draws nothing and owes nothing");
+        standings.settled(0, "ships", Published::Current, now, BOUND, Settling::step()).expect("it draws nothing and owes nothing");
         standings.step(Some(21), now);
-        standings.settled(0, "ships", Published::Cadence(18), now, BOUND).expect("it now draws something of an older hour");
+        standings.settled(0, "ships", Published::Cadence(18), now, BOUND, Settling::step()).expect("it now draws something of an older hour");
         assert_eq!(standings.layers[0].fell, 1, "the fall is counted");
-        let why = standings.settled(0, "ships", Published::Cadence(17), now, BOUND).expect_err("a product going back").to_string();
+        let why = standings.settled(0, "ships", Published::Cadence(17), now, BOUND, Settling::step()).expect_err("a product going back").to_string();
         assert!(why.contains("went backwards"), "{why}");
     }
 
@@ -326,16 +337,16 @@ mod tests {
         standings.check = true;
         let now = Instant::now();
         standings.step(Some(10), now);
-        standings.settled(0, "buildings", Published::At(8), now, BOUND).unwrap();
+        standings.settled(0, "buildings", Published::At(8), now, BOUND, Settling::step()).unwrap();
         for _ in 0..=super::STOPPED {
             standings.step(Some(10), now);
-            standings.settled(0, "buildings", Published::At(8), now, BOUND).unwrap();
+            standings.settled(0, "buildings", Published::At(8), now, BOUND, Settling::step()).unwrap();
         }
         assert!(standings.hours_stopped(), "the hours have not moved for more than the bound");
         let why = standings.stopped_whole(&[(0, "buildings")]).expect_err("the hours stopped and it is behind").to_string();
         assert!(why.contains("buildings") && why.contains("stopped"), "{why}");
         standings.judged = false;
-        standings.settled(0, "buildings", Published::At(10), now, BOUND).unwrap();
+        standings.settled(0, "buildings", Published::At(10), now, BOUND, Settling::step()).unwrap();
         standings.stopped_whole(&[(0, "buildings")]).expect("caught up, the stopped picture is whole");
     }
 
@@ -346,13 +357,13 @@ mod tests {
         let now = Instant::now();
         for at in 100..100 + BOUND as i32 {
             standings.step(Some(at), now);
-            standings.settled(0, "counters", Published::At(at - 1), now, BOUND).unwrap();
+            standings.settled(0, "counters", Published::At(at - 1), now, BOUND, Settling::step()).unwrap();
         }
         standings.reset();
         assert_eq!(standings.behind(0), 0, "nothing stands behind the picture a seek has not made yet");
         for at in 20..20 + BOUND as i32 {
             standings.step(Some(at), now);
-            standings.settled(0, "counters", Published::At(at - 1), now, BOUND).expect("the sought picture is its own");
+            standings.settled(0, "counters", Published::At(at - 1), now, BOUND, Settling::step()).expect("the sought picture is its own");
             assert_eq!(standings.behind(0), 1);
         }
     }
@@ -364,19 +375,19 @@ mod tests {
         let now = Instant::now();
         for at in 1..=10 {
             standings.step(Some(at), now);
-            standings.settled(0, "sounds", Published::At(at - 1), now, BOUND).unwrap();
+            standings.settled(0, "sounds", Published::At(at - 1), now, BOUND, Settling::step()).unwrap();
         }
         standings.step(Some(10), now);
-        standings.settled(0, "sounds", Published::At(10), now, BOUND).unwrap();
+        standings.settled(0, "sounds", Published::At(10), now, BOUND, Settling::step()).unwrap();
         for _ in 0..=super::STOPPED {
             standings.step(Some(10), now);
-            standings.settled(0, "sounds", Published::At(10), now, BOUND).unwrap();
+            standings.settled(0, "sounds", Published::At(10), now, BOUND, Settling::step()).unwrap();
         }
         assert_eq!(standings.behind(0), 0, "stopped, it stands at the hour shown");
         standings.stopped_whole(&[(0, "sounds")]).expect("the stopped picture is whole");
         for at in 11..=20 {
             standings.step(Some(at), now);
-            standings.settled(0, "sounds", Published::At(at - 1), now, BOUND).unwrap();
+            standings.settled(0, "sounds", Published::At(at - 1), now, BOUND, Settling::step()).unwrap();
             assert_eq!(standings.behind(0), 1);
         }
     }
@@ -387,13 +398,13 @@ mod tests {
         standings.check = true;
         let now = Instant::now();
         standings.step(Some(60), now);
-        standings.settled(0, "buildings", Published::At(59), now, BOUND).unwrap();
-        standings.settled(1, "political", Published::Current, now, BOUND).unwrap();
+        standings.settled(0, "buildings", Published::At(59), now, BOUND, Settling::step()).unwrap();
+        standings.settled(1, "political", Published::Current, now, BOUND, Settling::step()).unwrap();
         for step in 0..=super::STOPPED {
             standings.step(Some(60), now);
             let stands = if step < BOUND { Published::At(59) } else { Published::At(60) };
-            standings.settled(0, "buildings", stands, now, BOUND).unwrap();
-            standings.settled(1, "political", Published::Current, now, BOUND).unwrap();
+            standings.settled(0, "buildings", stands, now, BOUND, Settling::step()).unwrap();
+            standings.settled(1, "political", Published::Current, now, BOUND, Settling::step()).unwrap();
         }
         standings.stopped_whole(&[(0, "buildings"), (1, "political")]).expect("the last hour is whole on every layer");
     }
@@ -405,7 +416,7 @@ mod tests {
         for at in 0..KEPT as i32 * 2 {
             standings.step(Some(at), now);
         }
-        standings.settled(0, "labels", Published::At(0), now, BOUND).unwrap();
+        standings.settled(0, "labels", Published::At(0), now, BOUND, Settling::step()).unwrap();
         assert_eq!(standings.behind(0), u32::try_from(KEPT).expect("the publications kept"), "only the publications kept are counted");
     }
 }

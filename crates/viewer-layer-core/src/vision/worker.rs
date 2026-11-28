@@ -4,7 +4,7 @@ use super::{
     global::{self, Global, Source},
     kind,
 };
-use crate::{layers::{Due, Fed, Published}, owned::{Shape, Standing, Table, Tables}, playhead_host::mirror::Mirrors};
+use crate::{layers::{Due, Fed, Published, Retirement, RetirementFlag}, owned::{Shape, Standing, Table, Tables}, playhead_host::mirror::Mirrors};
 use playhead::Step;
 use replay_columnar::manifest::Status;
 use replay_data::{Hour, rows::TableId};
@@ -410,6 +410,7 @@ fn run(content: Arc<Content>, jobs: Receiver<Job>, made: viewer_runtime::landed:
 }
 
 pub(super) struct Folder {
+    retiring: RetirementFlag,
     content: Arc<Content>,
     jobs: Option<Sender<Job>>,
     made: Option<viewer_runtime::landed::Receiver<Made>>,
@@ -440,7 +441,12 @@ pub(super) struct Folder {
 
 impl Folder {
     pub(super) fn new(content: Arc<Content>) -> Self {
+        Self::with_retirement(content, RetirementFlag::default())
+    }
+
+    pub(super) fn with_retirement(content: Arc<Content>, retiring: RetirementFlag) -> Self {
         Self {
+            retiring,
             content,
             jobs: None,
             made: None,
@@ -550,11 +556,30 @@ impl Folder {
         self.changed.mark(kind, id);
     }
 
-    pub(super) fn exchange(&mut self, wait: bool) {
+    pub(super) fn retirement(&self) -> Retirement {
+        self.retiring.handle()
+    }
+
+    pub(super) fn retirement_flag(&self) -> RetirementFlag {
+        self.retiring.clone()
+    }
+
+    pub(super) fn exchange(&mut self, wait: bool) -> std::io::Result<()> {
         if let Some(receive) = &self.made {
             loop {
                 let caught_up = self.fed.arrived() && self.arrived >= self.asked;
-                let made = if wait && !caught_up { receive.recv().ok() } else { receive.try_recv().ok() };
+                if self.retiring.requested() {
+                    return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+                }
+                let made = if wait && !caught_up {
+                    match receive.recv_timeout(RetirementFlag::POLL) {
+                        Ok(made) => Some(made),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
+                    }
+                } else {
+                    receive.try_recv().ok()
+                };
                 let Some(made) = made else { break };
                 if made.epoch != self.epoch {
                     continue;
@@ -568,6 +593,7 @@ impl Folder {
         for made in due {
             self.take(made);
         }
+        Ok(())
     }
 
     fn take(&mut self, made: Made) {

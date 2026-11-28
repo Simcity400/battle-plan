@@ -1,5 +1,5 @@
 
-use viewer_layer_core::layers::{Carried, Inputs, Layer, Published, Rate, Settling, View};
+use viewer_layer_core::layers::{Carried, Inputs, Layer, Published, Rate, Retirement, RetirementFlag, Settling, View};
 use viewer_layer_core::playhead_host::{MapSide, mirror::Mirrors, views::{Need, Pace, Reader as ViewReader, Views}};
 use dashboard_text::triggers::World;
 use playhead::Step;
@@ -139,7 +139,6 @@ struct Open {
     seen: Option<Arc<DecodedFrame>>,
     handed: bool,
     handed_whole: bool,
-    evaluating: Option<Hour>,
 }
 
 impl Open {
@@ -182,7 +181,7 @@ impl Open {
                 }
             }
         })?;
-        Ok(Self { reader, jobs, done, busy: false, seen: None, handed: false, handed_whole: false, evaluating: None })
+        Ok(Self { reader, jobs, done, busy: false, seen: None, handed: false, handed_whole: false })
     }
 
     fn free(&self, held: impl Send + 'static) {
@@ -381,6 +380,7 @@ pub struct Scripts {
     pub clock: Clock,
     epoch: u64,
     stats: Stats,
+    retiring: RetirementFlag,
     #[cfg(test)]
     block_catch_up: bool,
 }
@@ -416,6 +416,7 @@ impl Scripts {
             clock: Clock::default(),
             epoch: 0,
             stats: Stats::default(),
+            retiring: RetirementFlag::default(),
             #[cfg(test)]
             block_catch_up: false,
         }
@@ -501,7 +502,7 @@ impl Scripts {
 
     fn take(&mut self, done: Landed<Done>) -> bool {
         let Some(open) = &mut self.open else { return false };
-        (open.busy, open.evaluating) = (false, None);
+        open.busy = false;
         if done.epoch != self.epoch {
             self.stats.stale += 1;
             return false;
@@ -561,7 +562,6 @@ impl Scripts {
         let job = Job { frame, choice: self.choice.clone(), content: self.content.clone(), raids: self.shown.0, music, whole, epoch: self.epoch, resets };
         if open.jobs.send(Work::Evaluate(Box::new(job))).is_ok() {
             (open.busy, open.handed, open.handed_whole) = (true, true, whole);
-            open.evaluating = open.seen.as_ref().map(|frame| frame.hour);
         }
     }
 
@@ -579,6 +579,9 @@ impl Scripts {
         };
         let music = self.shown.1;
         loop {
+            if self.retiring.requested() {
+                return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
             let whole = self.product.as_ref().is_some_and(|product| {
                 product.hour == hour && product.complete && (!music || product.music.as_ref().is_some_and(|(at, _)| *at == hour))
             });
@@ -591,33 +594,15 @@ impl Scripts {
                 return ran_out(format!("The {NAME} layer did not reach hour {hour} in {CATCH_UP:?}"), &mut self.stats);
             }
             if open.busy {
-                let done = match left {
-                    None => match open.done.recv() {
-                        Ok(done) => done,
-                        Err(_) => {
-                            open.busy = false;
-                            open.evaluating = None;
-                            return Err(io::Error::other(format!(
-                                "The {NAME} layer's worker stopped before answering for hour {hour}"
-                            )));
-                        }
-                    },
-                    Some(left) => match open.done.recv_timeout(left) {
-                        Ok(done) => done,
-                        Err(mpsc::RecvTimeoutError::Disconnected) => {
-                            open.busy = false;
-                            open.evaluating = None;
-                            return Err(io::Error::other(format!(
-                                "The {NAME} layer's worker stopped before answering for hour {hour}"
-                            )));
-                        }
-                        Err(mpsc::RecvTimeoutError::Timeout) => {
-                            return ran_out(
-                                format!("The {NAME} layer's worker did not answer for hour {hour}"),
-                                &mut self.stats,
-                            );
-                        }
-                    },
+                let done = match open.done.recv_timeout(left.map_or(RetirementFlag::POLL, |left| left.min(RetirementFlag::POLL))) {
+                    Ok(done) => done,
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        open.busy = false;
+                        return Err(io::Error::other(format!(
+                            "The {NAME} layer's worker stopped before answering for hour {hour}"
+                        )));
+                    }
                 };
                 if self.take(done) {
                     return Ok(());
@@ -642,6 +627,10 @@ impl Scripts {
 }
 
 impl Layer for Scripts {
+    fn retirement(&self) -> Option<Retirement> {
+        Some(self.retiring.handle())
+    }
+
     fn name(&self) -> &'static str {
         NAME
     }
@@ -735,13 +724,11 @@ impl Layer for Scripts {
     }
 
     fn published(&self) -> Published {
-        let Some(open) = &self.open else {
-            return self.product.as_ref().map_or(Published::Nothing, |product| Published::Cadence(product.hour));
-        };
-        let seen = open.seen.as_ref().map(|frame| frame.hour);
-        match (&self.product, seen) {
-            (Some(product), Some(seen)) if product.hour >= seen => Published::Current,
-            (Some(_), Some(seen)) if open.busy && open.evaluating == Some(seen) => Published::Current,
+        if self.shown == (false, false) {
+            return Published::Current;
+        }
+        match (&self.product, self.applied) {
+            (Some(product), Some(hour)) if product.hour == hour => Published::Current,
             (Some(product), _) => Published::Cadence(product.hour),
             (None, _) => Published::Nothing,
         }

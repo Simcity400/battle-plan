@@ -5,7 +5,7 @@ mod worker;
 
 use global::Global;
 
-use crate::layers::{Carried, Settling, Inputs, Layer, List, Num, Text, View};
+use crate::layers::{Carried, Retirement, Settling, Inputs, Layer, List, Num, Text, View};
 use crate::playhead_host::mirror::{Mirror, Mirrors};
 use playhead::Step;
 use replay_columnar::manifest::Status;
@@ -792,11 +792,11 @@ impl Vision {
         }
     }
 
-    fn settle_dirty(&mut self, mirrors: &Mirrors) {
+    fn settle_dirty(&mut self, mirrors: &Mirrors, wait: bool) -> io::Result<()> {
         self.frame += 1;
         self.take_marks(mirrors);
         let before = (self.fog_drawn(), self.global.ours);
-        self.settle_parts(mirrors);
+        self.settle_parts(mirrors, wait)?;
         if before != (self.fog_drawn(), self.global.ours) {
             self.fold.touch_all();
         }
@@ -807,12 +807,13 @@ impl Vision {
                 self.sight_epoch += 1;
             }
         }
+        Ok(())
     }
 
-    fn settle_parts(&mut self, mirrors: &Mirrors) {
-        self.fold.exchange(true);
+    fn settle_parts(&mut self, mirrors: &Mirrors, wait: bool) -> io::Result<()> {
+        self.fold.exchange(wait)?;
         if self.gap {
-            return;
+            return Ok(());
         }
         if let Some(global) = self.fold.take_global() {
             self.adopt(global);
@@ -825,7 +826,7 @@ impl Vision {
             self.fold.mark("province", u64::from(province));
         }
         if self.global.failed.is_some() {
-            return;
+            return Ok(());
         }
         if self.lanes_dirty {
             self.lanes_dirty = false;
@@ -837,6 +838,7 @@ impl Vision {
         let mut units = std::mem::take(&mut self.units);
         units.settle(|unit| self.settle_unit(unit, mirrors));
         self.units = units;
+        Ok(())
     }
 
 }
@@ -1053,7 +1055,8 @@ impl Layer for Vision {
 
     fn compose(&mut self, mirrors: &Mirrors) -> io::Result<()> {
         let (marked, copying, epoch) = (self.marked, self.copying, self.sight_epoch);
-        let fold = std::mem::replace(&mut self.fold, worker::Folder::new(Arc::clone(&self.content)));
+        let retiring = self.fold.retirement_flag();
+        let fold = std::mem::replace(&mut self.fold, worker::Folder::with_retirement(Arc::clone(&self.content), retiring));
         *self = Self { columns: self.columns, choice: self.choice.clone(), copying, fold, sight_epoch: epoch + 1, ..Self::new(Arc::clone(&self.content)) };
         self.fold.reset(mirrors, &self.columns(), &self.choice);
         self.statuses = mirrors.iter().map(|mirror| (mirror.table().index(), kind(mirror.status()))).collect();
@@ -1066,7 +1069,7 @@ impl Layer for Vision {
         }
         let units: Vec<u64> = self.unit_rows.keys().copied().collect();
         units.into_iter().for_each(|unit| self.mark_unit(unit));
-        self.settle_dirty(mirrors);
+        self.settle_dirty(mirrors, true)?;
         self.marked = marked;
         Ok(())
     }
@@ -1105,8 +1108,12 @@ impl Layer for Vision {
         self.copying += started.elapsed().as_nanos() as u64;
     }
 
-    fn settle(&mut self, mirrors: &Mirrors, _settling: Settling) -> io::Result<()> {
-        self.settle_dirty(mirrors);
+    fn retirement(&self) -> Option<Retirement> {
+        Some(self.fold.retirement())
+    }
+
+    fn settle(&mut self, mirrors: &Mirrors, settling: Settling) -> io::Result<()> {
+        self.settle_dirty(mirrors, settling.waits())?;
         [self.marked[1], self.marked[2]] = self.fold.marked();
         Ok(())
     }

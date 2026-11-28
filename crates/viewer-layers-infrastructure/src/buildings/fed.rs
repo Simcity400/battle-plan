@@ -1,7 +1,7 @@
 
 use std::time::Instant;
 use super::{Buildings, Declared, FromLayer, Inspected, Install, NOT_SLOTTED, READ, Seen, Upper};
-use viewer_layer_core::{layers::{Carried, Change, Changed, Settling, Fed as Products, Gpu, Inputs, Layer, Published, Scope, Scoped, Sight, Upstream, View}, playhead_host::mirror::{Mirror, Mirrors}};
+use viewer_layer_core::{layers::{Carried, Retirement, RetirementFlag, Change, Changed, Settling, Fed as Products, Gpu, Inputs, Layer, Published, Scope, Scoped, Sight, Upstream, View}, playhead_host::mirror::{Mirror, Mirrors}};
 use playhead::Step;
 use replay_data::{Hour, rows::TableId};
 use std::{
@@ -224,6 +224,7 @@ fn run(jobs: mpsc::Receiver<Job>, made: landed::Sender<Made>) {
 }
 
 pub struct BuildingsFed {
+    retiring: RetirementFlag,
     spec: Buildings,
     jobs: Option<mpsc::Sender<Job>>,
     made: Option<landed::Receiver<Made>>,
@@ -255,6 +256,7 @@ pub struct BuildingsFed {
 impl BuildingsFed {
     pub fn new(buildings: Buildings) -> Self {
         Self {
+            retiring: RetirementFlag::default(),
             spec: buildings,
             jobs: None,
             made: None,
@@ -365,7 +367,7 @@ impl BuildingsFed {
     fn exchange(&mut self, wait: bool) -> io::Result<()> {
         if let Some(receive) = &self.made {
             loop {
-                let made = if wait && self.owed > 0 { receive.recv().map_err(|_| mpsc::TryRecvError::Disconnected) } else { receive.try_recv() };
+                let made = if wait && self.owed > 0 { self.retiring.receive(receive)?.ok_or(mpsc::TryRecvError::Disconnected) } else { receive.try_recv() };
                 let made = match made {
                     Ok(made) => made,
                     Err(mpsc::TryRecvError::Empty) => break,
@@ -410,6 +412,10 @@ impl BuildingsFed {
 }
 
 impl Layer for BuildingsFed {
+    fn retirement(&self) -> Option<Retirement> {
+        Some(self.retiring.handle())
+    }
+
     fn name(&self) -> &'static str {
         "buildings"
     }

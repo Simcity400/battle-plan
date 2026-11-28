@@ -1,6 +1,6 @@
 
 use super::{BaseCounters, TABLES};
-use viewer_layer_core::{layers::{Carried, Settling, Fed as Products, Inputs, Layer, Published, View}, playhead_host::mirror::{Mirror, Mirrors}};
+use viewer_layer_core::{layers::{Carried, Retirement, RetirementFlag, Settling, Fed as Products, Inputs, Layer, Published, View}, playhead_host::mirror::{Mirror, Mirrors}};
 use playhead::Step;
 use replay_data::{Hour, rows::TableId};
 use std::{
@@ -97,6 +97,7 @@ fn run(jobs: mpsc::Receiver<Job>, made: viewer_runtime::landed::Sender<Made>) {
 }
 
 pub struct BaseCountersFed {
+    retiring: RetirementFlag,
     spec: BaseCounters,
     jobs: Option<mpsc::Sender<Job>>,
     made: Option<viewer_runtime::landed::Receiver<Made>>,
@@ -115,6 +116,7 @@ pub struct BaseCountersFed {
 impl BaseCountersFed {
     pub fn new(counters: BaseCounters) -> Self {
         Self {
+            retiring: RetirementFlag::default(),
             spec: counters,
             jobs: None,
             made: None,
@@ -178,10 +180,10 @@ impl BaseCountersFed {
         }
     }
 
-    fn exchange(&mut self, wait: bool) {
+    fn exchange(&mut self, wait: bool) -> io::Result<()> {
         if let Some(receive) = &self.made {
             loop {
-                let made = if wait && self.owed > 0 { receive.recv().map_err(|_| mpsc::TryRecvError::Disconnected) } else { receive.try_recv() };
+                let made = if wait && self.owed > 0 { self.retiring.receive(receive)?.ok_or(mpsc::TryRecvError::Disconnected) } else { receive.try_recv() };
                 let made = match made {
                     Ok(made) => made,
                     Err(mpsc::TryRecvError::Empty) => break,
@@ -204,10 +206,15 @@ impl BaseCountersFed {
         if self.stopped {
             self.values = None;
         }
+        Ok(())
     }
 }
 
 impl Layer for BaseCountersFed {
+    fn retirement(&self) -> Option<Retirement> {
+        Some(self.retiring.handle())
+    }
+
     fn held_viewer(&self) -> Option<u32> {
         self.perspective().map(|(_, vision)| vision.ours())
     }
@@ -247,8 +254,7 @@ impl Layer for BaseCountersFed {
         self.products.compose(mirrors.get(TableId::Provinces).and_then(Mirror::head));
         self.waiting.clear();
         self.send(Job::Reset { epoch: self.epoch, model, mirrors: copies });
-        self.exchange(true);
-        Ok(())
+        self.exchange(true)
     }
 
     fn apply(&mut self, step: &Step, _mirrors: &Mirrors) {
@@ -269,7 +275,7 @@ impl Layer for BaseCountersFed {
 
     fn settle(&mut self, _mirrors: &Mirrors, settling: Settling) -> io::Result<()> {
         let whole = settling.waits();
-        self.exchange(false);
+        self.exchange(false)?;
         let applied = self.products.applied_hour();
         let mut steps = Vec::new();
         while self.waiting.front().is_some_and(|step| applied.is_some_and(|applied| step.last() <= applied)) {
@@ -279,8 +285,7 @@ impl Layer for BaseCountersFed {
         if !steps.is_empty() || given.is_some() {
             self.send(Job::Frame { epoch: self.epoch, stamp: applied, steps, given });
         }
-        self.exchange(whole);
-        Ok(())
+        self.exchange(whole)
     }
 
 

@@ -1,7 +1,7 @@
 
 mod fold;
 
-use viewer_layer_core::{layers::{Carried, Settling, Due, Fed, Gpu, Inputs, Layer, List, Num, Published, View}, owned::{Shape, Table}};
+use viewer_layer_core::{layers::{Carried, Settling, Due, Fed, Gpu, Inputs, Layer, List, Num, Published, Retirement, RetirementFlag, View}, owned::{Shape, Table}};
 use viewer_layer_core::playhead_host::mirror::{Mirror, Mirrors};
 use fold::Fold;
 use map_snow::{Refresh, SnowCells, SnowMud, Summary, winter::Winter};
@@ -340,6 +340,7 @@ fn run(content: Arc<Content>, jobs: Receiver<Job>, made: landed::Sender<Made>, d
 }
 
 pub struct Snow {
+    retiring: RetirementFlag,
     content: Result<Arc<Content>, String>,
     columns: Option<Columns>,
     jobs: Option<Sender<Job>>,
@@ -364,6 +365,7 @@ pub struct Snow {
 impl Snow {
     pub fn new(content: Result<Arc<Content>, String>) -> Self {
         Self {
+            retiring: RetirementFlag::default(),
             content,
             columns: None,
             jobs: None,
@@ -466,22 +468,22 @@ impl Snow {
         self.worker.1 += 1;
     }
 
-    fn exchange(&mut self, wait: bool) {
-        if let Some(receive) = self.made.take() {
+    fn exchange(&mut self, wait: bool) -> io::Result<()> {
+        if let Some(receive) = &self.made {
             loop {
-                let made = if wait && !self.fed.arrived() { receive.recv().ok() } else { receive.try_recv().ok() };
+                let made = if wait && !self.fed.arrived() { self.retiring.receive(receive)? } else { receive.try_recv().ok() };
                 let Some(made) = made else { break };
                 if made.epoch == self.epoch {
                     self.fed.receive(made.stamp, made);
                 }
             }
-            self.made = Some(receive);
         }
         let mut due = Vec::new();
         self.fed.take(|made| due.push(made));
         for made in due {
             self.take(made);
         }
+        Ok(())
     }
 
     fn push(&mut self, target: &mut dyn Target) -> io::Result<()> {
@@ -557,6 +559,10 @@ pub fn summary(side: &viewer_layer_core::playhead_host::MapSide<impl viewer_laye
 }
 
 impl Layer for Snow {
+    fn retirement(&self) -> Option<Retirement> {
+        Some(self.retiring.handle())
+    }
+
     fn name(&self) -> &'static str {
         "snow"
     }
@@ -606,7 +612,7 @@ impl Layer for Snow {
             let _ = jobs.send(Job::Reset { epoch: self.epoch, table, columns, stamp: None });
         }
         (self.shown, self.reset, self.owed, self.parting) = (None, true, Changed::Unknown, None);
-        self.exchange(true);
+        self.exchange(true)?;
         Ok(())
     }
 
@@ -638,9 +644,9 @@ impl Layer for Snow {
         self.spent[0] += started.elapsed().as_nanos() as u64;
     }
 
-    fn settle(&mut self, _mirrors: &Mirrors, _settling: Settling) -> io::Result<()> {
+    fn settle(&mut self, _mirrors: &Mirrors, settling: Settling) -> io::Result<()> {
         let started = Instant::now();
-        self.exchange(true);
+        self.exchange(settling.waits())?;
         self.spent[1] += started.elapsed().as_nanos() as u64;
         Ok(())
     }

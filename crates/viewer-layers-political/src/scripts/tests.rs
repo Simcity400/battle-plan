@@ -385,14 +385,19 @@ fn a_stopped_picture_shows_the_scripts_product_of_its_own_hour() {
         assert_eq!(viewer_layer_core::layers::Layer::published(&scripts), viewer_layer_core::layers::Published::Current, "its product stands at the rows it has seen");
         stopped += 1;
     }
-    let evaluations: u64 = scripts.stats().evaluations.values().sum();
-    for _ in 0..8 {
-        let behind = (fixture.hour + 1 - scripts.product().expect("published above").hour) as u32;
-        step(&mut fixture, &mut scripts, Settling::step().behind_bound(behind, viewer_layer_core::layers::BOUND)).unwrap();
-        let behind = fixture.hour - scripts.product().expect("published above").hour;
-        assert!((0..viewer_layer_core::layers::BOUND as Hour).contains(&behind), "{behind} hours behind at hour {}", fixture.hour);
-    }
-    assert!(scripts.stats().evaluations.values().sum::<u64>() > evaluations, "the cycle is evaluated at the publication's rate");
+    let held = fixture.hour;
+    let waited = scripts.stats().waited;
+    let (pending, no_answer) = viewer_runtime::landed::channel();
+    drop(pending);
+    let open = scripts.open.as_mut().unwrap();
+    let done = std::mem::replace(&mut open.done, no_answer);
+    step(&mut fixture, &mut scripts, Settling::step()).unwrap();
+    let open = scripts.open.as_mut().unwrap();
+    assert!(open.busy, "the new hour is in flight");
+    open.done = done;
+    assert_eq!(scripts.stats().waited, waited);
+    assert_eq!(Layer::published(&scripts), crate::scripts::Published::Cadence(held));
+    assert_eq!(published(&scripts, ours, held), Some(today(&fixture, held, ours)));
     assert!(scripts.stats().rated > 0, "the music chances' rate withheld reads of them while the hours ran");
     let withheld = scripts.stats().rated;
     assert!(!scripts.music_due(false), "inside its interval the rate withholds the chances");

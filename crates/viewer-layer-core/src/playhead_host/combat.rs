@@ -1,5 +1,5 @@
 use super::views;
-use crate::layers::Settling;
+use crate::layers::{Retirement, RetirementFlag, Settling};
 use replay_data::{BranchId, Hour, rows::TableId};
 use replay_frame::frame::DecodedFrame;
 use std::{
@@ -66,10 +66,10 @@ struct Maker<A: Asking> {
     declared: Vec<TableId>,
     last: Option<Key<A::Key>>,
     newest: Arc<AtomicU64>,
-    took: Arc<AtomicU64>,
 }
 
 pub struct Combat<A: Asking> {
+    retiring: RetirementFlag,
     asking: Option<A>,
     maker: Option<Maker<A>>,
     learned: Vec<TableId>,
@@ -82,11 +82,15 @@ pub struct Combat<A: Asking> {
 
 impl<A: Asking> Default for Combat<A> {
     fn default() -> Self {
-        Self { asking: None, maker: None, learned: Vec::new(), generation: 0, asked: None, handed: None, made: None, loading: Vec::new() }
+        Self { retiring: RetirementFlag::default(), asking: None, maker: None, learned: Vec::new(), generation: 0, asked: None, handed: None, made: None, loading: Vec::new() }
     }
 }
 
 impl<A: Asking> Combat<A> {
+    pub fn retirement(&self) -> Retirement {
+        self.retiring.handle()
+    }
+
     pub fn ask(&mut self, asking: Option<A>) {
         if asking.is_none() {
             (self.maker, self.asked, self.handed, self.made) = (None, None, None, None);
@@ -115,32 +119,28 @@ impl<A: Asking> Combat<A> {
             maker.last = Some(key.clone());
             maker.newest.fetch_add(1, Ordering::AcqRel);
         }
-        let (rows, newest, took) = (Arc::clone(&maker.rows), Arc::clone(&maker.newest), Arc::clone(&maker.took));
+        let (rows, newest) = (Arc::clone(&maker.rows), Arc::clone(&maker.newest));
         let stamp = newest.load(Ordering::Acquire);
         maker.reads.ask(
             key.clone(),
-            move || {
-                let started = Instant::now();
-                let made = rows_at(&rows, hour, epoch, &newest, stamp).map(|frame| asking.read(branch, hour, epoch, frame, engaged));
-                took.store(started.elapsed().as_nanos() as u64, Ordering::Release);
-                made
-            },
+            move || rows_at(&rows, hour, epoch, &newest, stamp).map(|frame| asking.read(branch, hour, epoch, frame, engaged)),
             || {},
         );
         self.asked = Some(key);
         true
     }
 
-    pub fn join(&mut self, settling: Settling, interval: Duration) -> Joined {
+    pub fn join(&mut self, settling: Settling) -> Joined {
         let (Some(key), Some(maker)) = (self.asked.take(), self.maker.as_mut()) else { return Joined { answered: true, made: false } };
-        let limit = if settling.waits() {
-            WHOLE
-        } else if Duration::from_nanos(maker.took.load(Ordering::Acquire)) <= interval {
-            interval
-        } else {
-            Duration::ZERO
-        };
-        maker.reads.wait(|done| *done == key, limit);
+        if settling.waits() {
+            let until = Instant::now() + WHOLE;
+            while !self.retiring.requested() && maker.reads.busy() {
+                let left = until.saturating_duration_since(Instant::now());
+                if left.is_zero() || maker.reads.wait(|done| *done == key, left.min(RetirementFlag::POLL)) {
+                    break;
+                }
+            }
+        }
         let missed = maker.reads.take_missed();
         let answered = missed.is_empty();
         if !answered {
@@ -188,7 +188,7 @@ impl<A: Asking> Maker<A> {
     fn open(store: &views::Store, learned: &[TableId]) -> Self {
         let declared = Self::tables(learned);
         let rows = Arc::new(store.reader("combat window", &declared.iter().copied().map(views::Need::every).collect::<Vec<_>>()));
-        Self { reads: Reads::new("combat window reads"), rows, declared, last: None, newest: Arc::default(), took: Arc::default() }
+        Self { reads: Reads::new("combat window reads"), rows, declared, last: None, newest: Arc::default() }
     }
 
     fn tables(learned: &[TableId]) -> Vec<TableId> {
@@ -287,21 +287,20 @@ mod tests {
         let branch = Some(RECORDING.branch);
         let epoch = entry.playhead().epoch();
         let read = || reads.recv_timeout(WHOLE).expect("a read starts");
-        let interval = Duration::from_millis(1);
 
         assert!(combat.ask_step(fed.store(), Some(1), branch, epoch, None));
         assert!(fed.drive(1));
         assert_eq!(read(), 1);
         finish.send(()).unwrap();
-        assert!(combat.join(Settling::still(), interval).answered);
+        assert!(combat.join(Settling::still()).answered);
         assert_eq!(combat.take().map(Landed::into_inner), Some(1), "the head standing still waits for its hour's read");
         assert!(!combat.ask_step(fed.store(), Some(1), branch, epoch, None), "the frame holds hour 1's read: nothing is read again");
 
         assert!(combat.ask_step(fed.store(), Some(2), branch, epoch, None));
         assert!(fed.drive(2));
         assert_eq!(read(), 2);
-        assert!(combat.join(Settling::step(), interval).answered);
-        assert_eq!(combat.take(), None, "playing, the step does not wait for a read past its interval");
+        assert!(combat.join(Settling::step()).answered);
+        assert_eq!(combat.take(), None, "playing, the step does not wait for the pending read");
         assert_eq!(combat.loading(), ["its read of hour 2"], "and says what the window waits for");
 
         assert!(combat.ask_step(fed.store(), Some(3), branch, epoch, None));
@@ -309,7 +308,7 @@ mod tests {
         finish.send(()).unwrap();
         assert_eq!(read(), 3, "hour 3's read follows hour 2's");
         finish.send(()).unwrap();
-        assert!(combat.join(Settling::still(), interval).answered);
+        assert!(combat.join(Settling::still()).answered);
         assert_eq!(combat.take().map(Landed::into_inner), Some(3), "hour 3's publication hands hour 3's read, never hour 2's");
     }
 
@@ -328,9 +327,9 @@ mod tests {
         assert!(fed.drive(1));
         assert_eq!(reads.recv_timeout(WHOLE), Ok(1));
         finish.send(()).unwrap();
-        assert_eq!(combat.join(Settling::still(), Duration::ZERO), Joined { answered: true, made: true });
+        assert_eq!(combat.join(Settling::still()), Joined { answered: true, made: true });
         assert!(combat.ask_step(fed.store(), Some(0), branch, epoch, None), "hour 1's read is not taken yet: hour 0 is asked");
-        assert_eq!(combat.join(Settling::still(), Duration::ZERO), Joined { answered: true, made: false }, "hour 0's rows are passed: this join took nothing");
+        assert_eq!(combat.join(Settling::still()), Joined { answered: true, made: false }, "hour 0's rows are passed: this join took nothing");
         assert!(!combat.ask_step(fed.store(), Some(0), branch, epoch, None), "a passed hour is handed so a paused turn does not retry it forever");
         assert_eq!(combat.take().map(Landed::into_inner), Some(1), "hour 1's read is still the frame's to take");
     }
