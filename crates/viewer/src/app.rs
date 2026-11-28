@@ -4477,6 +4477,7 @@ impl Viewer {
                     self.playhead_opened = false;
                 }
                 Ok(side) => {
+                    self.head_rows.open_clicks(side.views());
                     document.playback.read_rosters_of(side.entry());
                     let released = document.playback.release_source();
                     self.retire(released);
