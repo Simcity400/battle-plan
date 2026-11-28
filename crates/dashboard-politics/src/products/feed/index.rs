@@ -1085,7 +1085,7 @@ pub(super) struct CardEvents {
 }
 
 impl CardEvents {
-    pub(super) fn read(&mut self, query: &Query<'_>, locators: &[Locator]) -> io::Result<&HashMap<u128, FeedEvent>> {
+    pub(super) fn read(&mut self, query: &Query<'_>, locators: &[Locator], reader: Option<&IndexedStateRecords>) -> io::Result<&HashMap<u128, FeedEvent>> {
         let mut wanted = HashMap::with_capacity(locators.len());
         if !locators.iter().all(|&at| wanted.insert(at.key, at).is_none_or(|previous| previous == at)) {
             self.locators.clear();
@@ -1095,7 +1095,15 @@ impl CardEvents {
         self.rows.retain(|key, _| wanted.get(key).is_some_and(|at| self.locators.get(key) == Some(at)));
         let missing: Vec<_> = wanted.values().copied().filter(|at| !self.rows.contains_key(&at.key)).collect();
         if !missing.is_empty() {
-            self.rows.extend(read_events(query, &missing)?);
+            let indexed = match reader {
+                Some(reader) => read_indexed_events(query, &missing, reader)?,
+                None => None,
+            };
+            let rows = match indexed {
+                Some(rows) => rows,
+                None => read_events(query, &missing)?,
+            };
+            self.rows.extend(rows);
         }
         self.locators = wanted;
         Ok(&self.rows)
