@@ -266,6 +266,13 @@ export function isSingleValueOrdered(model: BarsModel, form: BarsPlaybackForm = 
           : !!row.target || (row.value.value.kind === 'zero' && row.numeric === 0))));
 }
 
+export function supportsBarsPlayback(model: BarsModel, form: BarsPlaybackForm): boolean {
+  if (form !== 'share') return isSingleValueOrdered(model, form);
+  return model.form === 'share' && !model.pickList && !model.twoSidedLayout
+    && model.rows.every(row => row.kind !== 'data' || (row.segments !== undefined
+      && !row.target && !row.left && !row.right && !row.rightSide && !row.pair));
+}
+
 export class FutureBarsDataError extends Error {
   constructor(message: string) {
     super(message);

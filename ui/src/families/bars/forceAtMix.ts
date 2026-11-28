@@ -101,6 +101,8 @@ export function projectForceAtMix(
         label: pres.label,
         media: pres.media,
         segments: [],
+        segmentsIncomplete: value.kind === 'partial' || item.partsMissing !== null || item.partsPartial?.some(Boolean)
+          || item.values.length !== reply.parts.length || item.values.some(raw => raw === null),
         countText,
         tooltip: {
           title: barsLabelText(pres.label),
@@ -210,6 +212,7 @@ export function projectForceAtMix(
       label: pres.label,
       media: pres.media,
       segments,
+      segmentsIncomplete: value.kind === 'partial' || item.partsPartial?.some(Boolean),
       countText,
       tooltip: {
         title: barsLabelText(pres.label),

@@ -8,7 +8,7 @@ import { DEFAULT_SEEDS, deriveColors } from '../shell/appearance/themes.ts';
 import { defaultArtFrame, readyArt } from './art/types.ts';
 import { barsLane, type FamilyBarsBinding } from './bars/laneView.ts';
 import type { BarsModel } from './bars/model.ts';
-import type { FamilyTheme } from './contract.ts';
+import type { BarsPlaybackForm, FamilyTheme } from './contract.ts';
 import { createLaneView } from './laneRuntime.ts';
 import { registerFamilyProjection } from './registry.ts';
 import { knownValue } from './value.ts';
@@ -152,7 +152,7 @@ async function checkReadoutClearance() {
   return result;
 }
 
-async function checkSettledPixels(form: true | 'target-markers' | 'ordered-segments') {
+async function checkSettledPixels(form: BarsPlaybackForm) {
   const sprite = new OffscreenCanvas(37, 21);
   const brush = sprite.getContext('2d')!;
   brush.fillStyle = theme.red;
@@ -166,12 +166,13 @@ async function checkSettledPixels(form: true | 'target-markers' | 'ordered-segme
     family: 'bars', kind,
     singleValueBars: () => form,
     project(view): BarsModel {
+      const modelForm = form === 'share' ? 'share' : 'ordered';
       const refused = view.refused('main');
-      if (refused) return { form: 'ordered', hour: view.hour, rows: [], empty: refused, emptyKind: 'unavailable' };
+      if (refused) return { form: modelForm, hour: view.hour, rows: [], empty: refused, emptyKind: 'unavailable' };
       const value = Number(view.panel('main'));
       const target = value <= 0.1 ? 0.1 : value + 40;
       return {
-        form: 'ordered', hour: view.hour, scaleMax: 200, showAxis: true,
+        form: modelForm, hour: view.hour, scaleMax: 200, showAxis: form !== 'share',
         rows: [{
           kind: 'data', key: 'fixture', label: knownValue('Fixture country'), numeric: value, value: { value: knownValue(value) },
           media: { kind: 'flag', art: flag, tag: 'FIX' },
@@ -183,6 +184,13 @@ async function checkSettledPixels(form: true | 'target-markers' | 'ordered-segme
             segments: [
               { key: 'solid', label: 'Solid', share: value < 100 ? .75 : .25, color: theme.blue, value: knownValue(value * .25) },
               { key: 'dashed', label: 'Dashed', share: .75, color: theme.red, hatched: true, value: knownValue(value * .75) },
+            ],
+          } : {}),
+          ...(form === 'share' ? {
+            readout: { primary: `${value} units` },
+            segments: [
+              { key: 'solid', label: 'Solid', share: value < 100 ? .45 : .6, color: theme.blue, value: knownValue(value) },
+              { key: 'dashed', label: 'Dashed', share: value < 100 ? .35 : .4, color: theme.red, hatched: true, value: knownValue(value) },
             ],
           } : {}),
         }],
@@ -206,7 +214,7 @@ async function checkSettledPixels(form: true | 'target-markers' | 'ordered-segme
     await cold.request(100);
     results.push({ dpr, moving, paused: changedBytes(cold.pixels(), played.pixels()) });
     const tinyValues = form === 'target-markers' ? [[0.1, 0], [0, 0.1]]
-      : form === 'ordered-segments' ? [[0.1, 150], [150, 0.1]] : [];
+      : form === 'ordered-segments' || form === 'share' ? [[0.1, 150], [150, 0.1]] : [];
     for (const values of tinyValues) {
       const live = rig(kind, dpr, values);
       const endpoint = rig(kind, dpr, values);

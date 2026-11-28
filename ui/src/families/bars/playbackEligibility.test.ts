@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { liveKey } from '../../charts/live.ts';
+import { valuesOf } from '../../test-support/liveValues.ts';
 import { MEASURES } from '../../widgets/army-size/armySizeMeta.ts';
 import type { EquipmentProducedRaceOptions } from '../../widgets/equipment-produced/equipmentProducedRaceProjection.ts';
 import { COUNT_MODES } from '../../widgets/factories/factoriesData.ts';
@@ -9,7 +11,7 @@ import { createBoundedReadView, displayedHour } from '../boundedView.ts';
 import { normalizeView } from '../manifest.ts';
 import type { FactionTotalsRaceOptions } from './factionTotalsRace.ts';
 import type { BarsPlaybackForm } from '../contract.ts';
-import { isSingleValueOrdered, type BarsProjection } from './model.ts';
+import { isSingleValueOrdered, supportsBarsPlayback, type BarsProjection } from './model.ts';
 
 const hour = displayedHour(100);
 const settings = { top: null, group: false, surface: '#1e1e1e' };
@@ -49,24 +51,99 @@ function factionReply(value: number, options: FactionTotalsRaceOptions) {
   };
 }
 
-function check<O>(projection: BarsProjection<O>, options: O, expected: BarsPlaybackForm | false, panel: (value: number) => unknown, source = 'main') {
+function check<O>(projection: BarsProjection<O>, options: O, expected: BarsPlaybackForm | false, panel: (value: number) => unknown, source = 'main',
+  live?: (amount: number) => ReadonlyMap<string, number>) {
   const context = `${projection.kind} ${JSON.stringify(options)}`;
   assert.equal(projection.singleValueBars?.(options), expected, context);
   if (!expected) return;
   for (const amount of counts) {
-    const view = createBoundedReadView({ hour, panels: new Map([[source, panel(amount)]]) });
+    const view = createBoundedReadView({
+      hour, panels: new Map([[source, panel(amount)]]),
+      ...(live ? { live: new Map([[source, valuesOf(live(amount), 'Not recorded')]]) } : {}),
+    });
     const model = projection.project(view, options);
     assert.ok(model.rows.some(row => row.kind === 'data'), context);
-    assert.ok(isSingleValueOrdered(model, expected), context);
-    if (expected === 'ordered-segments' && amount > 0) assert.ok(model.rows.some(row => row.kind === 'data' && row.segments?.length), context);
+    assert.ok(supportsBarsPlayback(model, expected), context);
+    if ((expected === 'ordered-segments' || expected === 'share') && amount > 0) assert.ok(model.rows.some(row => row.kind === 'data' && row.segments?.length), context);
   }
   for (const view of [
     createBoundedReadView({ hour }),
     createBoundedReadView({ hour, refused: new Map([[source, 'Unavailable']]) }),
-  ]) assert.ok(isSingleValueOrdered(projection.project(view, options), expected), context);
+  ]) assert.ok(supportsBarsPlayback(projection.project(view, options), expected), context);
 }
 
 const cases: Record<string, (projection: BarsProjection<unknown>) => void> = {
+  'air-force-size/mix': projection => {
+    for (const measure of ['planes', 'wings']) for (const ownership of ['roster', 'effective']) for (const group of booleans) {
+      check(projection, { ...settings, measure, ownership, group }, 'share', forces);
+    }
+  },
+  'army-size/mix': projection => {
+    for (const countFor of ['owner', 'host']) for (const group of booleans) check(projection, { ...settings, countFor, group }, 'share', forces);
+  },
+  'factories/mix': projection => {
+    for (const { value: mode, label: modeLabel } of COUNT_MODES) for (const group of booleans) {
+      check(projection, { ...settings, mode, modeLabel, group }, 'share', amount => ({
+        hour, mode, missing: null, warnings: [],
+        parts: [{ key: 'military', name: 'Military Factory', damaged: false, group: 'military' }],
+        rows: [{ country: 1, tag: 'GER', total: amount, values: [amount], shares: [amount > 0 ? 1 : null], missing: null, partsMissing: null }],
+      }));
+    }
+  },
+  'naval-losses/mix': projection => {
+    for (const kind of ['ships', 'convoys', 'both']) for (const attribution of ['lost', 'sunkBy']) for (const period of ['month', 'running']) for (const group of booleans) {
+      check(projection, { ...settings, kind, attribution, period, group }, 'share', forces);
+    }
+  },
+  'navy-size/mix': projection => {
+    for (const measure of ['ships', 'strength']) for (const ownership of ['roster', 'logical']) for (const grouping of ['class', 'type']) for (const group of booleans) {
+      check(projection, { ...settings, measure, ownership, grouping, group }, 'share', forces);
+    }
+  },
+  'nuclear-arsenal/mix': projection => {
+    for (const group of booleans) check(projection, { ...settings, group }, 'share', amount => ({
+      types: [{ ordinal: 0, token: 'type', name: 'Type' }], missing: null, warnings: [],
+      countries: [{ tag: 'GER', countryId: 1, slot: null, total: amount, counts: [{ ordinal: 0, value: amount, ready: 0 }] }],
+    }));
+  },
+  'minefields/default': projection => {
+    for (const order of ['mines', 'name']) check(projection, { ...settings, order }, 'share', () => ({
+      regions: [{ region: 3, owners: [{ tag: 'ENG' }], unknownOwners: 0, pinned: false, missing: null }],
+      unknown: [], empty: null, activeUnlisted: { ids: [], missing: null }, scale: 100000, warnings: [],
+    }), 'main', amount => new Map([[liveKey('3', 'ENG'), amount], [liveKey('3', 'total'), amount]]));
+  },
+  'naval-supremacy/shares': projection => {
+    check(projection, { ...settings, viewer: null, historyStart: hour, tiles: 0 }, 'share', amount => ({
+      firstHour: hour, lastHour: hour, validThrough: hour, firstDayHour: hour, dayHours: 24, days: 1,
+      rankMissing: null, empty: null, activeUnlisted: { ids: [], missing: null }, unknown: [], gaps: [],
+      viewerName: 'Germany', viewerColor: [90, 90, 90], legend: [], scale: 100, warnings: [],
+      regions: [{
+        id: '17', name: 'English Channel', pinned: false, runs: [],
+        ownShips: { kind: 'counted', ships: 1 }, enemyShips: { kind: 'notRecorded', reason: 'No ship count' },
+        readout: { kind: 'control', control: 1, share: String(amount), friendly: String(amount), enemy: String(amount), own: String(amount), as_of_hour: hour },
+      }],
+    }), 'now');
+  },
+  'air-superiority-region/default': projection => {
+    for (const mode of ['sides', 'viewpoint']) for (const order of ['contested', 'active', 'name']) for (const filteredSides of booleans) {
+      const options = { mode, order, filteredSides, enemyColor: '#e5484d', mutedColor: '#8a8a8a' };
+      const sides = { kind: 'sides', parts: [{ side: 0, tag: 'ENG', live: 'ENG@11' }], viewpoints: [],
+        unknown: [], noAirObject: [], filtered: filteredSides, excluded: 0 };
+      check(projection, options, 'share', () => ({
+        missing: null, unlisted: null, empty: null, activeUnlisted: { ids: [], missing: null },
+        sides: [{ key: 'c:ENG', faction: null, colourFaction: null, factions: [], tag: 'ENG', leader: 'ENG', coBelligerents: 0,
+          anchor: { tag: 'ENG', hour }, name: 'United Kingdom', color: [34, 197, 94] }],
+        legend: [0], viewpoint: mode === 'viewpoint' ? 0 : null,
+        regions: [{ id: 11, name: 'English Channel', nameMissing: null, active: true, pinned: true, wings: 'unknown',
+          cell: mode === 'viewpoint' ? { kind: 'view', side: 0, leader: 'ENG', live: 'ENG@11' } : sides }],
+        fallback: { ...sides, parts: [] }, scale: 100, badBelow: 40, goodAbove: 60, warnings: [],
+      }), 'main', amount => new Map([
+        [liveKey('ENG@11', 'friendly'), amount],
+        [liveKey('ENG@11', 'enemy'), amount],
+        [liveKey('11', 'total'), mode === 'viewpoint' ? amount * 2 : amount],
+      ]));
+    }
+  },
   'fuel-branches/bars': projection => {
     for (const digits of [0, 1, 2, 3, 4, 5]) {
       const options = { ...settings, digits };
@@ -193,7 +270,7 @@ const cases: Record<string, (projection: BarsProjection<unknown>) => void> = {
   'world-tension/race': projection => { check(projection, settings, true, amount => rank(amount, 'contribution')); },
 };
 
-test('every bars projection declaring ordered playback has fixtures for the options it accepts', async t => {
+test('every bars projection declaring playback has fixtures for the options it accepts', async t => {
   const entries = await Promise.all(BARS_VIEWS.map(entry => entry.loadSpec()));
   const declaring = entries.filter(entry => entry.projection.singleValueBars);
   assert.deepEqual(declaring.map(entry => `${entry.kind}/${normalizeView(entry.view)}`).sort(), Object.keys(cases).sort());

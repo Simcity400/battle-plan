@@ -17,6 +17,7 @@ const armyCountFor = (value: unknown): ArmyAttribution => (value === 'host' ? 'h
 export const armySizeMixProjection: BarsProjection<ArmySizeMixOptions> = registerFamilyProjection({
   kind: 'army-size',
   family: 'bars',
+  singleValueBars: () => 'share',
   nextChange: () => Infinity,
   project(readView: BoundedReadView, options: ArmySizeMixOptions): BarsModel {
     const hour = readView.hour;

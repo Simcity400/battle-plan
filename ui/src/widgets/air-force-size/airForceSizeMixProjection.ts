@@ -19,6 +19,7 @@ const airOwnership = (value: unknown): AirForceOwnershipOption => (value === 'ef
 export const airForceSizeMixProjection: BarsProjection<AirForceSizeMixOptions> = registerFamilyProjection({
   kind: 'air-force-size',
   family: 'bars',
+  singleValueBars: () => 'share',
   nextChange: () => Infinity,
   project(readView: BoundedReadView, options: AirForceSizeMixOptions): BarsModel {
     const hour = readView.hour;

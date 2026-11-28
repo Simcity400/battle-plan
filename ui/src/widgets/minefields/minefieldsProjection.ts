@@ -123,6 +123,7 @@ function projectMineRegion(
   }
 
   const segments: BarsSegment[] = [];
+  let segmentsIncomplete = region.unknownOwners > 0 || region.missing !== null;
   const items: TooltipListItem[] = [{ label: 'Mines', value: minesCountText(total, scale) }];
   const unrecordedColour = reservedGrey(surface);
   for (const owner of region.owners) {
@@ -132,6 +133,7 @@ function projectMineRegion(
     const ownerKey = liveKey(id, owner.tag);
     const amount = readBigInt(live, ownerKey);
     if (amount === null) {
+      segmentsIncomplete = true;
       items.push({ label: ownerName, swatch: ownerColor, missingReason: live?.missing(ownerKey) ?? 'Not recorded at this hour' });
       continue;
     }
@@ -167,6 +169,7 @@ function projectMineRegion(
     subject: id,
     label: named.value,
     segments,
+    segmentsIncomplete,
     countText: minesCountText(total, scale),
     tooltip: {
       title: name,
@@ -180,6 +183,7 @@ function projectMineRegion(
 export const minefieldsProjection: BarsProjection<MinefieldsProjectionOptions> = registerFamilyProjection({
   kind: 'minefields',
   family: 'bars',
+  singleValueBars: () => 'share',
   project(readView: BoundedReadView, options: MinefieldsProjectionOptions): BarsModel {
     const hour = readView.hour;
     const refused = readView.refused('main');

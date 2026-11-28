@@ -378,6 +378,7 @@ function projectRegion(
 export const airSuperiorityRegionProjection: BarsProjection<AirSuperiorityProjectionOptions> = registerFamilyProjection({
   kind: 'air-superiority-region',
   family: 'bars',
+  singleValueBars: () => 'share',
   project(readView: BoundedReadView, options: AirSuperiorityProjectionOptions): BarsModel {
     const hour = readView.hour;
     const refused = readView.refused('main');

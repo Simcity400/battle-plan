@@ -66,6 +66,7 @@ test('projectForceAtMix builds share rows with legend and marks unreconciled par
   const rows = model.rows.filter((r): r is BarsDataRow => r.kind === 'data');
   assert.deepEqual(rows[0]!.segments?.map(s => [s.label, s.share]), [['Ships', 0.25], ['Convoys', 0.75]]);
   assert.equal(rows[0]!.readout?.primary, '100 (partial)');
+  assert.deepEqual(model.rows.filter(row => row.kind === 'data').map(row => row.segmentsIncomplete), [true, undefined, undefined, true, true]);
   assert.equal(deriveBarsMirror(model).rows[0]!.cells.find(cell => cell.column === 'readout')?.spoken, '100, partial: Uncounted ship');
   assert.deepEqual(rows[0]!.tooltip?.items?.map(item => item.partialReason), ['Uncounted ship', 'Uncounted ship', undefined]);
   const race = projectForceAtReply(view, reply, { surface: '#1e1e1e', top: 10, group: false, split: true }, {

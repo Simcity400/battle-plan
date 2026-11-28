@@ -21,6 +21,7 @@ const navyGrouping = (value: unknown): NavyGroupingOption => (value === 'type' ?
 export const navySizeMixProjection: BarsProjection<NavySizeMixOptions> = registerFamilyProjection({
   kind: 'navy-size',
   family: 'bars',
+  singleValueBars: () => 'share',
   nextChange: () => Infinity,
   project(readView: BoundedReadView, options: NavySizeMixOptions): BarsModel {
     const hour = readView.hour;

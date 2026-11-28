@@ -21,6 +21,7 @@ function sharePct(share: number): string {
 export const nuclearArsenalMixProjection: BarsProjection<NuclearArsenalMixOptions> = registerFamilyProjection({
   kind: 'nuclear-arsenal',
   family: 'bars',
+  singleValueBars: () => 'share',
   nextChange: () => Infinity,
   project(readView: BoundedReadView, options: NuclearArsenalMixOptions): BarsModel {
     const hour = readView.hour;

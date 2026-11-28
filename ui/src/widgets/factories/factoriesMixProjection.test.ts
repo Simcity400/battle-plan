@@ -75,6 +75,7 @@ test('factoriesMixProjection sends group selection to Rust, keys rows by recorde
       { country: 9, tag: 'GER', total: 20, values: [null, 10, null, 0], shares: [null, 0.5, null, 0], missing: null, partsMissing: 'Damaged factories do not reconcile with built factories at this hour' },
       { country: 12, tag: 'LUX', total: 0, values: [0, 0, 0, 0], shares: [null, null, null, null], missing: null, partsMissing: null },
       { country: 14, tag: 'FRA', total: null, values: [null, null, 3, null], shares: [null, null, null, null], missing: 'A factory total does not fit a whole number', partsMissing: null },
+      { country: 15, tag: 'POL', total: 0, values: [0, 0, 0, null], shares: [null, null, null, null], missing: null, partsMissing: 'Civilian damage not recorded' },
     ],
     missing: null,
     warnings: [],
@@ -92,7 +93,7 @@ test('factoriesMixProjection sends group selection to Rust, keys rows by recorde
   const model = factoriesMixProjection.project(view, { ...OPTS, top: null });
   assertBarsModelValid(model, 300);
   const rows = model.rows.filter((r): r is BarsDataRow => r.kind === 'data');
-  assert.deepEqual(rows.map(r => r.key), [countryKey(7), countryKey(9), countryKey(12), countryKey(14)], 'rows keyed by recorded slot, never collapsed on reassigned tag');
+  assert.deepEqual(rows.map(r => r.key), [countryKey(7), countryKey(9), countryKey(12), countryKey(14), countryKey(15)], 'rows keyed by recorded slot, never collapsed on reassigned tag');
   assert.deepEqual(rows[0]!.label, { kind: 'known', value: 'German Reich' });
   assert.deepEqual(rows[1]!.label, { kind: 'known', value: 'West Germany' });
   assert.equal(rows[0]!.segments?.length, 3);
@@ -102,6 +103,8 @@ test('factoriesMixProjection sends group selection to Rust, keys rows by recorde
   assert.equal(rows[1]!.segments?.[0]!.share, 0.5);
   assert.equal(rows[1]!.value?.value.kind, 'notRecorded');
   assert.equal(rows[2]!.readout?.primary, '0', 'recorded zero is preserved');
+  assert.equal(rows[2]!.segmentsIncomplete, undefined);
+  assert.equal(rows[4]!.segmentsIncomplete, true);
   assert.equal(rows[3]!.value?.value.kind, 'notRecorded');
   assert.ok(rows[3]!.tooltip?.items?.some(item => item.label === 'Damaged Military Factory' && item.value === '3'), 'witnessed part count kept in tooltip even when total is missing');
   assert.equal(model.scaleUnit, 'Factories');
